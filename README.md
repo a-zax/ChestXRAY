@@ -93,39 +93,75 @@ flowchart LR
 
 ## 📁 Project Structure
 
-```
-PS_2_Cognitive_Radiology_Report/
+`
+ChestXRAY/
+├── run.py                     # Master CLI runner (setup, check, demo, gui, etc.)
+├── run.ps1                    # Windows PowerShell launcher
+├── run.sh                     # Linux / macOS shell launcher
+├── AGENT_GUIDE.md             # Complete manual for AI Agents (Claude, Codex, etc.)
+├── requirements.txt           # Python dependencies
 ├── models/
-│   ├── encoder.py               # MODULE 1: PRO-FA implementation
-│   ├── classifier.py            # MODULE 2: MIX-MLP implementation
-│   ├── attention.py             # MODULE 3: RCTA implementation
-│   ├── cognitive_model.py       # Complete integrated model
-│   └── dataset.py               # ChestXrayDataset, data transforms
+│   ├── encoder.py             # MODULE 1: PRO-FA implementation (ViT-B/16)
+│   ├── classifier.py          # MODULE 2: MIX-MLP implementation (14 diseases)
+│   ├── attention.py           # MODULE 3: RCTA implementation (Tri-modal attention)
+│   ├── cognitive_model.py     # Complete integrated vision-language model
+│   └── dataset.py             # ChestXrayDataset, data transforms
 ├── training/
-│   └── train.py                 # Training loop with checkpointing
+│   └── train.py               # Training loop with mixed-precision & checkpointing
 ├── evaluation/
-│   └── evaluate.py              # CheXpert F1, RadGraph F1, CIDEr, BLEU-4
+│   └── evaluate.py            # CheXpert F1, RadGraph F1, CIDEr, BLEU-4 benchmarks
 ├── scripts/
-│   ├── download_with_hub.py     # HuggingFace dataset download
-│   ├── download_mimic.py        # MIMIC-CXR download
-│   ├── preprocess_iu_xray.py    # IU X-Ray preprocessing
-│   ├── preprocess_mimic.py      # MIMIC-CXR preprocessing
-│   ├── generate_reports.py      # Inference script
-│   └── gui_app.py               # Interactive GUI demo (PySide6)
-├── data/                        # Dataset directory (git-ignored)
-├── checkpoints/                 # Trained model weights
-│   ├── best_model.pth
-│   ├── latest_model.pth
+│   ├── download_checkpoint.py # Multi-threaded parallel Mega checkpoint downloader
+│   ├── create_sample_data.py  # Sample chest X-ray image downloader / generator
+│   ├── generate_reports.py    # Report generation inference script
+│   ├── gui_app.py             # Interactive GUI demo (PySide6)
+│   ├── download_with_hub.py   # HuggingFace dataset download
+│   ├── download_mimic.py      # MIMIC-CXR download
+│   ├── preprocess_iu_xray.py  # IU X-Ray preprocessing
+│   └── preprocess_mimic.py    # MIMIC-CXR preprocessing
+├── data/                      # Dataset directory
+│   └── sample_images/         # Ready-to-use sample chest X-rays
+├── checkpoints/               # Trained model weights (best_model.pth)
 ├── notebooks/
-│   ├── ps2-cognitive-radiology-report-generation.ipynb
-├── requirements.txt             # Python dependencies
-├── pack_project.py              # Zip codebase for submission
-└── README.md                    # This file
-```
+│   └── ps2-cognitive-radiology-report-generation.ipynb
+├── docs/                      # Original paper and hackathon submission notes
+└── README.md                  # This file
+`
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Unified One-Click Execution (Recommended)
+
+This project includes a master CLI runner (
+un.py), platform scripts (
+un.ps1 / 
+un.sh), and an AI Agent Guide (AGENT_GUIDE.md) for seamless execution across any environment:
+
+`ash
+# 1. Automatic Environment & Dependencies Setup
+python run.py --setup
+
+# 2. Complete System & Model Healthcheck
+python run.py --check
+
+# 3. Download the 3GB Trained Checkpoint (Multi-threaded & Resumable)
+python run.py --download-model
+
+# 4. Generate Diagnostic Radiology Report on a Sample Chest X-Ray
+python run.py --demo
+
+# 5. Launch Interactive Desktop GUI (PySide6)
+python run.py --gui
+
+# 6. Run Architectural & Unit Tests
+python run.py --test
+`
+
+> 💡 **For AI Agents:** Detailed architecture diagrams, tensor contracts, programmatic Python APIs, and troubleshooting steps are documented in AGENT_GUIDE.md.
+
+---
+
+## 🚀 Alternative Quick Start
 
 ### Option 1: Google Colab (Recommended for Training)
 
