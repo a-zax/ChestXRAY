@@ -189,6 +189,8 @@ def cmd_demo(args):
         cmd.extend(["--checkpoint", args.checkpoint])
     if args.indication:
         cmd.extend(["--indication", args.indication])
+    if getattr(args, 'profile', None):
+        cmd.extend(["--profile", args.profile])
     return run_cmd(cmd)
 
 
@@ -258,6 +260,7 @@ Examples:
     parser.add_argument("--image", type=str, default=None, help="Input chest X-ray image path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file path")
     parser.add_argument("--indication", type=str, default=None, help="Clinical indication text")
+    parser.add_argument("--profile", type=str, default="balanced", choices=["balanced", "cardiopulmonary", "infection", "specific"], help="Sensitivity calibration profile")
     
     # Options for downloader
     parser.add_argument("--workers", type=int, default=10, help="Concurrent workers for checkpoint download")

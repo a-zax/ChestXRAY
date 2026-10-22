@@ -2,6 +2,7 @@
 """
 Inference script for Cognitive Report Generator.
 Generates structured radiology reports (Findings + Impression) from chest X-rays.
+Includes configurable ClinicalGrounder calibration profiles.
 """
 
 import os
@@ -40,24 +41,54 @@ class ClinicalGrounder:
         "Support Devices": "Multiple support devices, including a nasogastric tube and cardiac leads, are in standard positions."
     }
 
-    @staticmethod
-    def refine(report, disease_probs):
-        thresholds = {
-            "No Finding": 0.65,
-            "Enlarged Cardiomediastinum": 0.35,
-            "Cardiomegaly": 0.40,
-            "Lung Opacity": 0.45,
-            "Lung Lesion": 0.30,
-            "Edema": 0.50,
-            "Consolidation": 0.40,
-            "Pneumonia": 0.35,
-            "Atelectasis": 0.45,
-            "Pneumothorax": 0.30,
-            "Pleural Effusion": 0.55,
-            "Pleural Other": 0.30,
-            "Fracture": 0.25,
-            "Support Devices": 0.60
+    DEFAULT_THRESHOLDS = {
+        "No Finding": 0.65,
+        "Enlarged Cardiomediastinum": 0.35,
+        "Cardiomegaly": 0.40,
+        "Lung Opacity": 0.45,
+        "Lung Lesion": 0.30,
+        "Edema": 0.50,
+        "Consolidation": 0.40,
+        "Pneumonia": 0.35,
+        "Atelectasis": 0.45,
+        "Pneumothorax": 0.30,
+        "Pleural Effusion": 0.55,
+        "Pleural Other": 0.30,
+        "Fracture": 0.25,
+        "Support Devices": 0.60
+    }
+
+    PROFILES = {
+        "balanced": DEFAULT_THRESHOLDS,
+        "cardiopulmonary": {
+            **DEFAULT_THRESHOLDS,
+            "Cardiomegaly": 0.30,
+            "Pleural Effusion": 0.38,
+            "Edema": 0.35,
+            "No Finding": 0.75
+        },
+        "infection": {
+            **DEFAULT_THRESHOLDS,
+            "Pneumonia": 0.28,
+            "Consolidation": 0.32,
+            "Lung Opacity": 0.35,
+            "No Finding": 0.75
+        },
+        "specific": {
+            **DEFAULT_THRESHOLDS,
+            "Cardiomegaly": 0.55,
+            "Pleural Effusion": 0.65,
+            "Pneumonia": 0.50,
+            "Edema": 0.60,
+            "No Finding": 0.50
         }
+    }
+
+    @staticmethod
+    def refine(report, disease_probs, custom_thresholds=None):
+        thresholds = ClinicalGrounder.DEFAULT_THRESHOLDS.copy()
+        if custom_thresholds:
+            thresholds.update(custom_thresholds)
 
         if disease_probs.get("No Finding", 0) > thresholds["No Finding"]:
             return "The lungs are clear. There is no evidence of focal consolidation, effusion, or pneumothorax. The cardiomediastinal silhouette is normal."
@@ -74,17 +105,16 @@ class ClinicalGrounder:
         return " ".join(findings_detected)
 
 
-def generate_report(model, image_path, enc_tokenizer, dec_tokenizer, device, max_length=256, indication_text=None):
+def generate_report(model, image_path, enc_tokenizer, dec_tokenizer, device, max_length=256, indication_text=None, thresholds=None):
     model.eval()
     
-    # Load and preprocess image
     try:
         image = Image.open(image_path).convert('RGB')
         image = np.array(image)
         
         transform = get_transforms(is_train=False)
         augmented = transform(image=image)
-        image_tensor = augmented['image'].unsqueeze(0).to(device)  # [1, 3, 224, 224]
+        image_tensor = augmented['image'].unsqueeze(0).to(device)
     except Exception as e:
         print(f"Error loading image '{image_path}': {e}")
         return None, None
@@ -118,7 +148,7 @@ def generate_report(model, image_path, enc_tokenizer, dec_tokenizer, device, max
             "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices"
         ]
         disease_dict = {d: p.item() for d, p in zip(diseases, disease_probs[0])}
-        grounded_report = ClinicalGrounder.refine(raw_report, disease_dict)
+        grounded_report = ClinicalGrounder.refine(raw_report, disease_dict, custom_thresholds=thresholds)
         
     return grounded_report, disease_dict
 
@@ -128,14 +158,12 @@ def visualize_result(image_path, report, disease_probs, output_path="outputs/dem
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         plt.figure(figsize=(12, 6))
         
-        # 1. Input Image
         img = Image.open(image_path).convert('RGB')
         plt.subplot(1, 2, 1)
         plt.imshow(img, cmap='gray')
         plt.axis('off')
         plt.title(f"Input: {Path(image_path).name}", fontsize=11, fontweight='bold')
         
-        # 2. Report Text
         plt.subplot(1, 2, 2)
         plt.axis('off')
         plt.title("Cognitive Radiology Report", fontsize=11, fontweight='bold')
@@ -181,6 +209,10 @@ def main(args):
     dec_tokenizer = AutoTokenizer.from_pretrained(args.decoder)
     if dec_tokenizer.pad_token is None:
         dec_tokenizer.pad_token = dec_tokenizer.eos_token
+
+    # Resolve sensitivity calibration profile
+    thresholds = ClinicalGrounder.PROFILES.get(args.profile.lower(), ClinicalGrounder.DEFAULT_THRESHOLDS)
+    print(f"[*] Calibration profile: {args.profile}")
         
     print(f"[*] Generating report for: {args.image}...")
     report, disease_probs = generate_report(
@@ -189,7 +221,8 @@ def main(args):
         enc_tokenizer, 
         dec_tokenizer, 
         device,
-        indication_text=args.indication
+        indication_text=args.indication,
+        thresholds=thresholds
     )
     
     if report is None:
@@ -204,7 +237,7 @@ def main(args):
     
     print("\nDisease Probabilities (MIX-MLP 14 Pathologies):")
     for d, p in disease_probs.items():
-        flag = " [DETECTED]" if p > 0.4 else ""
+        flag = " [DETECTED]" if p >= thresholds.get(d, 0.40) else ""
         print(f"  - {d:26s}: {p*100:5.1f}%{flag}")
 
     visualize_result(args.image, report, disease_probs)
@@ -215,6 +248,7 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint', type=str, default='checkpoints/best_model.pth', help="Path to checkpoint file")
     parser.add_argument('--image', type=str, default=None, help="Path to image. If None, picks from sample data.")
     parser.add_argument('--indication', type=str, default=None, help="Clinical indication text")
+    parser.add_argument('--profile', type=str, default='balanced', choices=['balanced', 'cardiopulmonary', 'infection', 'specific'], help="Sensitivity calibration profile")
     parser.add_argument('--dataset_root', type=str, default='data', help="Root to search if no image provided")
     parser.add_argument('--visual_encoder', type=str, default='vit_base_patch16_224')
     parser.add_argument('--text_encoder', type=str, default='distilbert-base-uncased')
