@@ -3,9 +3,10 @@ import os
 from pathlib import Path
 
 def zip_project(output_filename="project_codebase.zip"):
-    # Folders and files to include
-    include_dirs = ["models", "training", "evaluation", "scripts", "configs"]
-    include_files = ["requirements.txt", "README.md", "submission.txt", "Run_on_Colab.ipynb", "Run_on_Kaggle.ipynb"]
+    include_dirs = ["models", "training", "evaluation", "scripts", "configs", "assets", "docs", "tests"]
+    include_files = [
+        "requirements.txt", "README.md", "AGENT_GUIDE.md", "run.py", "run.ps1", "run.sh"
+    ]
     
     with zipfile.ZipFile(output_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for item in include_dirs:
@@ -14,18 +15,17 @@ def zip_project(output_filename="project_codebase.zip"):
                     if "__pycache__" in root:
                         continue
                     for file in files:
-                        if file.endswith(".pyc"):
+                        if file.endswith((".pyc", ".part", ".pth")):
                             continue
                         file_path = os.path.join(root, file)
                         zipf.write(file_path, file_path)
-                        print(f"Added: {file_path}")
         
         for item in include_files:
             if os.path.exists(item):
                 zipf.write(item, item)
-                print(f"Added: {item}")
 
-    print(f"\nSuccessfully created {output_filename}")
+    size_kb = os.path.getsize(output_filename) // 1024
+    print(f"\n[+] Successfully created {output_filename} ({size_kb} KB)")
 
 if __name__ == "__main__":
     zip_project()
