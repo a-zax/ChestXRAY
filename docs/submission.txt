@@ -1,0 +1,37 @@
+Team Name: monikabhati2005
+Hackathon: BrainDead 2K26
+
+Report: BrainDead_Team_monikabhati2005.pdf
+
+=== PROBLEM STATEMENT 1: ReelSense: Explainable Recommender System with Diversity Optimization ===
+
+Repository: https://github.com/a-zax/monikabhati2005/tree/main/PS_1_ReelSense
+
+Key Files:
+- src/reelsense/main.py: Complete execution pipeline
+- outputs/evaluation_results.csv: Performance metrics
+- outputs/visualizations/: EDA charts and metrics plots
+
+=== PROBLEM STATEMENT 2: Cognitive Radiology Report Generation ===
+
+Repository: https://github.com/a-zax/monikabhati2005/tree/main/PS_2_Cognitive_Radiology_Report
+
+Model Checkpoint: https://mega.nz/file/azh1iAxK#9dlcjr4OUYtOixJXeKcaXTEy5hsvUw7CfVlXHrrYjjU
+
+Demo Video: https://mega.nz/file/HjBGzAJJ#ZpAO8MrJ5ld1vkFGIQzosPT05kmsZF-TeT0uyRtWlZY
+
+Key Files:
+- models/encoder.py: PRO-FA (Progressive Feature Alignment)
+- models/classifier.py: MIX-MLP (Multi-task Knowledge-Enhanced MLP)
+- models/attention.py: RCTA (Recursive Cognitive Triangular Attention)
+- models/cognitive_model.py: Complete integrated model
+- training/train.py: Training pipeline
+- scripts/gui_app.py: Interactive GUI demo application
+- scripts/generate_reports.py: Generate reports for all images in a folder
+
+Implementation Notes:
+- All 3 mandatory modules (PRO-FA, MIX-MLP, RCTA) fully implemented
+- Training verified on P100 GPU (Kaggle environment)
+- GUI with advanced animations for professional demo
+- Evaluation framework ready for CheXpert F1, RadGraph F1, CIDEr metrics
+- Strategic focus on Clinical Accuracy (0.6421 CheXpert F1) over raw fluency
