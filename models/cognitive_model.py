@@ -41,8 +41,15 @@ class CognitiveReportGenerator(nn.Module):
         if pretrained:
             self.text_encoder = AutoModel.from_pretrained(text_encoder_name)
         else:
-            from transformers import AutoConfig, AutoModel
-            self.text_encoder = AutoModel.from_config(AutoConfig.from_pretrained(text_encoder_name))
+            # Keep checkpoint-backed construction offline. The checkpoint has
+            # the architecture weights, so the model configs can be defined
+            # locally instead of resolving a Hugging Face repo during startup.
+            from transformers import DistilBertConfig, DistilBertModel
+            if text_encoder_name != 'distilbert-base-uncased':
+                raise ValueError(
+                    "Offline config is defined only for 'distilbert-base-uncased'."
+                )
+            self.text_encoder = DistilBertModel(DistilBertConfig())
         text_hidden = self.text_encoder.config.hidden_size
         self.text_proj = nn.Linear(text_hidden, hidden_dim)
         
@@ -56,7 +63,17 @@ class CognitiveReportGenerator(nn.Module):
                 add_cross_attention=True
             )
         else:
-            decoder_config = GPT2Config.from_pretrained(decoder_name, add_cross_attention=True)
+            if decoder_name != 'distilgpt2':
+                raise ValueError("Offline config is defined only for 'distilgpt2'.")
+            decoder_config = GPT2Config(
+                vocab_size=50257,
+                n_positions=1024,
+                n_ctx=1024,
+                n_embd=768,
+                n_layer=6,
+                n_head=12,
+                add_cross_attention=True,
+            )
             self.decoder = GPT2LMHeadModel(decoder_config)
         # Enable gradient checkpointing for memory efficiency
         self.decoder.gradient_checkpointing_enable()

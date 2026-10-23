@@ -42,7 +42,7 @@ try:
         QScrollArea, QSizePolicy, QPlainTextEdit
     )
     from PySide6.QtCore import Qt, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize, QTimer, QObject, QEvent, QPoint, Property
-    from PySide6.QtGui import QPixmap, QFont, QFontDatabase, QColor, QPainter, QKeySequence, QShortcut, QIcon, QPen, QPolygon
+    from PySide6.QtGui import QPixmap, QFont, QFontDatabase, QColor, QPainter, QPainterPath, QKeySequence, QShortcut, QIcon, QPen, QPolygon
 except Exception as exc:
     raise SystemExit(
         "Unable to start the GUI because a required dependency failed to import. "
@@ -255,6 +255,73 @@ def caption_icon(kind, color="#475467"):
         painter.drawLine(17, 7, 7, 17)
     painter.end()
     return QIcon(pixmap)
+
+
+class RadiologyLogo(QWidget):
+    """Original chest-radiograph mark drawn directly with PySide6 painting."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(40, 40)
+        self.setAccessibleName("Cognitive Radiology Assistant logo")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.scale(self.width() / 40, self.height() / 40)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#175cd3"))
+        painter.drawRoundedRect(0, 0, 40, 40, 12, 12)
+
+        lung_color = QColor("#ffffff")
+        lung_color.setAlpha(38)
+        painter.setBrush(lung_color)
+        painter.setPen(QPen(QColor("#dbeafe"), 1.25))
+        left_lung = QPainterPath()
+        left_lung.moveTo(19, 13)
+        left_lung.cubicTo(15, 10, 10, 12, 9, 18)
+        left_lung.cubicTo(7, 23, 9, 30, 13, 31)
+        left_lung.cubicTo(17, 32, 19, 27, 19, 21)
+        left_lung.closeSubpath()
+        right_lung = QPainterPath()
+        right_lung.moveTo(21, 13)
+        right_lung.cubicTo(25, 10, 30, 12, 31, 18)
+        right_lung.cubicTo(33, 23, 31, 30, 27, 31)
+        right_lung.cubicTo(23, 32, 21, 27, 21, 21)
+        right_lung.closeSubpath()
+        painter.drawPath(left_lung)
+        painter.drawPath(right_lung)
+
+        pen = QPen(QColor("#ffffff"), 1.7)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(20, 7, 20, 15)
+        painter.drawLine(20, 14, 15, 19)
+        painter.drawLine(20, 14, 25, 19)
+        painter.drawLine(20, 15, 20, 32)
+        painter.end()
+
+
+class SidebarNavIcon(QWidget):
+    """Custom plus glyph for starting a new analysis."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#175cd3"), 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(9, 3, 9, 15)
+        painter.drawLine(3, 9, 15, 9)
+        painter.end()
 
 
 class WorkflowStepper(QWidget):
@@ -470,13 +537,13 @@ QToolTip { background: #102a43; color: #ffffff; border: none; padding: 5px 8px; 
 QFrame#Sidebar { background: #ffffff; border: none; border-right: 1px solid #eaecf0; }
 QLabel#SidebarBrand { color: #101828; font-size: 13px; font-weight: 800; background: transparent; }
 QLabel#NavCaption { color: #98a2b3; font-size: 9px; font-weight: 800; letter-spacing: 1px; background: transparent; }
-QLabel#NavActive { background: #eff4ff; color: #175cd3; border-radius: 8px; padding: 10px; font-weight: 700; }
+QFrame#NavActive { background: #eff4ff; border-radius: 8px; }
+QLabel#NavActiveText { background: transparent; color: #175cd3; font-weight: 700; }
 QFrame#QuickTip { background: #f8f9fb; border: 1px solid #eaecf0; border-radius: 9px; }
 QLabel#SidebarDisclaimer { color: #667085; font-size: 10px; background: transparent; padding: 4px 2px; }
 QLabel#Breadcrumb { color: #667085; font-size: 12px; background: transparent; }
 QLabel#PageTitle { color: #101828; font-size: 24px; font-weight: 800; background: transparent; }
 QFrame#HeaderCard, QFrame#Card { background: #ffffff; border: 1px solid #e1e8f0; border-radius: 14px; }
-QLabel#BrandMark { background: #174ea6; color: #ffffff; border-radius: 12px; font-size: 16px; font-weight: 800; }
 QLabel#HeaderTitle { color: #102a43; font-size: 20px; font-weight: 800; background: transparent; }
 QLabel#HeaderSubtitle { color: #52667a; font-size: 12px; background: transparent; }
 QLabel#SectionTitle { color: #102a43; font-size: 18px; font-weight: 800; background: transparent; }
@@ -574,9 +641,21 @@ class ModelLoaderThread(QThread):
             from models.cognitive_model import CognitiveReportGenerator
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            # Loading from disk on CPU avoids a large GPU allocation during
-            # deserialization; transfer once the state is attached to the model.
-            checkpoint = torch.load(self.checkpoint_path, map_location='cpu')
+            # Load only model weights. Training checkpoints also contain Adam
+            # moments, which are large and unused by inference. mmap keeps the
+            # CPU peak lower while reading the checkpoint (PyTorch 2.x).
+            try:
+                checkpoint = torch.load(
+                    self.checkpoint_path,
+                    map_location='cpu',
+                    weights_only=True,
+                    mmap=True,
+                )
+            except TypeError:
+                # Compatibility with older PyTorch versions.
+                checkpoint = torch.load(self.checkpoint_path, map_location='cpu')
+            state_dict = checkpoint['model_state_dict']
+            del checkpoint
             model = CognitiveReportGenerator(
                 visual_encoder='vit_base_patch16_224',
                 text_encoder_name='distilbert-base-uncased',
@@ -585,7 +664,8 @@ class ModelLoaderThread(QThread):
                 hidden_dim=512,
                 pretrained=False
             )
-            model.load_state_dict(checkpoint['model_state_dict'])
+            model.load_state_dict(state_dict)
+            del state_dict
             model = model.to(device)
             model.eval()
             enc_tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
@@ -742,10 +822,8 @@ class MainWindow(QMainWindow):
         side.setSpacing(12)
         brand = QHBoxLayout()
         brand.setSpacing(10)
-        mark = QLabel("XR")
+        mark = RadiologyLogo()
         mark.setObjectName("BrandMark")
-        mark.setAlignment(Qt.AlignCenter)
-        mark.setFixedSize(38, 38)
         brand.addWidget(mark)
         brand_name = QLabel("Cognitive\nRadiology Assistant")
         brand_name.setObjectName("SidebarBrand")
@@ -758,10 +836,22 @@ class MainWindow(QMainWindow):
         caption.setObjectName("NavCaption")
         self._sidebar_caption = caption
         side.addWidget(caption)
-        active_nav = QLabel("New analysis")
+        active_nav = QFrame()
         active_nav.setObjectName("NavActive")
         active_nav.setToolTip("New analysis")
         self._sidebar_active = active_nav
+        self._sidebar_nav_layout = QHBoxLayout(active_nav)
+        self._sidebar_nav_layout.setContentsMargins(10, 8, 10, 8)
+        self._sidebar_nav_layout.setSpacing(9)
+        nav_icon = SidebarNavIcon(active_nav)
+        nav_icon.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._sidebar_nav_icon = nav_icon
+        self._sidebar_nav_layout.addWidget(nav_icon, alignment=Qt.AlignVCenter)
+        nav_text = QLabel("New analysis")
+        nav_text.setObjectName("NavActiveText")
+        nav_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._sidebar_nav_text = nav_text
+        self._sidebar_nav_layout.addWidget(nav_text)
         side.addWidget(active_nav)
         side.addStretch(1)
         tip = QFrame()
@@ -1106,13 +1196,17 @@ class MainWindow(QMainWindow):
         compact = self.width() < 1180
         if hasattr(self, "sidebar") and compact != self._sidebar_compact:
             self._sidebar_compact = compact
-            self.sidebar.setFixedWidth(64 if compact else 232)
+            self.sidebar.setFixedWidth(72 if compact else 232)
             self._sidebar_brand_name.setVisible(not compact)
             self._sidebar_caption.setVisible(not compact)
             self._sidebar_tip.setVisible(not compact)
             self._sidebar_disclaimer.setVisible(not compact)
-            self._sidebar_active.setText("XR" if compact else "New analysis")
-            self._sidebar_active.setAlignment(Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
+            self._sidebar_nav_text.setVisible(not compact)
+            self._sidebar_nav_layout.setAlignment(Qt.AlignCenter if compact else Qt.AlignLeft)
+            self._sidebar_nav_layout.setContentsMargins(0 if compact else 10,
+                                                        0 if compact else 8,
+                                                        0 if compact else 10,
+                                                        0 if compact else 8)
         self._render_preview()
 
     def _render_preview(self):

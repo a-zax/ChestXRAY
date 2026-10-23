@@ -50,6 +50,8 @@ The GUI looks for `checkpoints/best_model.pth` at startup and begins loading it 
 python run.py --download-model
 ```
 
+The downloader uses parallel HTTP range requests (24 workers and 8 MiB chunks by default) and resumes completed chunks after an interruption. Tune both for your connection, for example `python run.py --download-model --workers 32 --chunk-mb 16`; higher concurrency may not help if the file host or your internet connection is the limit.
+
 The trained checkpoint is large. The model and tokenizer dependencies may also need to be available locally or downloaded by Transformers the first time they are loaded.
 
 For other runner commands, use:

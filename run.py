@@ -217,6 +217,8 @@ def cmd_download_model(args):
     cmd = [sys.executable, str(script)]
     if args.workers:
         cmd.extend(["--workers", str(args.workers)])
+    if args.chunk_mb:
+        cmd.extend(["--chunk-mb", str(args.chunk_mb)])
     if args.force:
         cmd.append("--force")
     return run_cmd(cmd)
@@ -268,7 +270,8 @@ Examples:
     parser.add_argument("--profile", type=str, default="balanced", choices=["balanced", "cardiopulmonary", "infection", "specific"], help="Sensitivity calibration profile")
     
     # Options for downloader
-    parser.add_argument("--workers", type=int, default=10, help="Concurrent workers for checkpoint download")
+    parser.add_argument("--workers", type=int, default=24, help="Concurrent workers for checkpoint download")
+    parser.add_argument("--chunk-mb", type=int, default=8, help="Range request size in MiB for checkpoint download")
     parser.add_argument("--force", action="store_true", help="Force re-download")
 
     args, extra_args = parser.parse_known_args()

@@ -3,7 +3,7 @@
 High-Speed Multi-Threaded Checkpoint Downloader for Cognitive Radiology Report Generator.
 Downloads and decrypts Mega.nz files using parallel chunked HTTP Range requests and AES-128-CTR.
 Features:
-- 8-12 parallel worker threads (10-20x faster than single-threaded)
+- Parallel range requests with per-thread keep-alive connections
 - Chunk-level resume persistence via progress JSON
 - Atomic file writes and ZIP archive header verification
 """
@@ -32,8 +32,21 @@ except ImportError:
 
 
 DEFAULT_MEGA_URL = "https://mega.nz/file/azh1iAxK#9dlcjr4OUYtOixJXeKcaXTEy5hsvUw7CfVlXHrrYjjU"
-CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB per chunk (multiple of 16 for AES)
-DEFAULT_WORKERS = 10
+DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB; AES block aligned
+DEFAULT_WORKERS = 24
+_thread_local = threading.local()
+
+
+def _worker_session():
+    """Return a reusable HTTP session owned by the current worker thread."""
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _thread_local.session = session
+    return session
 
 
 def parse_mega_url(url: str):
@@ -75,12 +88,13 @@ def compute_counter_bytes(iv_pair: tuple, block_offset: int) -> bytes:
     return counter_int.to_bytes(16, byteorder="big")
 
 
-def download_chunk(session, dl_url, start, end, key_bytes, iv_pair, file_handle, write_lock, max_retries=5):
+def download_chunk(dl_url, start, end, key_bytes, iv_pair, file_handle, write_lock, max_retries=5):
     for attempt in range(max_retries):
         try:
             headers = {"Range": f"bytes={start}-{end}"}
-            resp = session.get(dl_url, headers=headers, timeout=30)
-            if resp.status_code not in (200, 206):
+            session = _worker_session()
+            resp = session.get(dl_url, headers=headers, timeout=120)
+            if resp.status_code != 206:
                 raise IOError(f"HTTP {resp.status_code} on chunk {start}-{end}")
             encrypted_data = resp.content
             expected_len = end - start + 1
@@ -110,8 +124,13 @@ def download_checkpoint(
     url: str = DEFAULT_MEGA_URL,
     dest_dir: str = "checkpoints",
     workers: int = DEFAULT_WORKERS,
-    force: bool = False
+    force: bool = False,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ):
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if chunk_size < 16 or chunk_size % 16:
+        raise ValueError("chunk_size must be a positive multiple of 16 bytes")
     dest_path = Path(dest_dir)
     dest_path.mkdir(parents=True, exist_ok=True)
 
@@ -154,7 +173,7 @@ def download_checkpoint(
     chunks = []
     offset = 0
     while offset < total_size:
-        chunk_end = min(offset + CHUNK_SIZE - 1, total_size - 1)
+        chunk_end = min(offset + chunk_size - 1, total_size - 1)
         chunks.append((offset, chunk_end))
         offset = chunk_end + 1
 
@@ -166,8 +185,12 @@ def download_checkpoint(
         try:
             with open(progress_file, "r") as pf:
                 saved = json.load(pf)
-                completed_chunks = set(saved.get("completed_chunks", []))
-                print(f"[*] Resuming from previous session: {len(completed_chunks)}/{total_chunks} chunks already downloaded.")
+                if saved.get("chunk_size") == chunk_size and saved.get("total_size") == total_size:
+                    completed_chunks = set(saved.get("completed_chunks", []))
+                    print(f"[*] Resuming from previous session: {len(completed_chunks)}/{total_chunks} chunks already downloaded.")
+                else:
+                    print("[*] Download settings changed; restarting incomplete chunk map safely.")
+                    completed_chunks = set()
         except Exception:
             completed_chunks = set()
 
@@ -189,16 +212,15 @@ def download_checkpoint(
 
     write_lock = threading.Lock()
     state_lock = threading.Lock()
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=workers, pool_maxsize=workers*2)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-
     def save_state():
         with state_lock:
             try:
                 with open(progress_file, "w") as pf:
-                    json.dump({"completed_chunks": list(completed_chunks)}, pf)
+                    json.dump({
+                        "completed_chunks": list(completed_chunks),
+                        "chunk_size": chunk_size,
+                        "total_size": total_size,
+                    }, pf)
             except Exception:
                 pass
 
@@ -209,7 +231,6 @@ def download_checkpoint(
             future_to_chunk = {
                 executor.submit(
                     download_chunk,
-                    session,
                     dl_url,
                     start,
                     end,
@@ -266,11 +287,12 @@ def download_checkpoint(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Multi-threaded Mega Checkpoint Downloader")
+    parser = argparse.ArgumentParser(description="Parallel Mega checkpoint downloader")
     parser.add_argument("--url", default=DEFAULT_MEGA_URL, help="Mega file URL")
     parser.add_argument("--dest-dir", default="checkpoints", help="Destination folder")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Number of concurrent worker threads")
+    parser.add_argument("--chunk-mb", type=int, default=DEFAULT_CHUNK_SIZE // (1024 * 1024), help="Range request size in MiB (default: 8)")
     parser.add_argument("--force", action="store_true", help="Force re-download")
     args = parser.parse_args()
 
-    download_checkpoint(url=args.url, dest_dir=args.dest_dir, workers=args.workers, force=args.force)
+    download_checkpoint(url=args.url, dest_dir=args.dest_dir, workers=args.workers, force=args.force, chunk_size=args.chunk_mb * 1024 * 1024)
