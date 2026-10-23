@@ -23,12 +23,13 @@ class CognitiveReportGenerator(nn.Module):
         text_encoder_name='distilbert-base-uncased',
         decoder_name='distilgpt2',
         num_diseases=14,
-        hidden_dim=512
+        hidden_dim=512,
+        pretrained=True
     ):
         super().__init__()
         
         # Module 1: PRO-FA
-        self.visual_encoder = PROFA(model_name=visual_encoder, pretrained=True)
+        self.visual_encoder = PROFA(model_name=visual_encoder, pretrained=pretrained)
         
         # Module 2: MIX-MLP
         self.disease_classifier = MIXMLP(in_dim=hidden_dim, num_diseases=num_diseases)
@@ -37,7 +38,11 @@ class CognitiveReportGenerator(nn.Module):
         self.triangular_attention = RCTA(d_model=hidden_dim, nhead=8)
         
         # Text encoder for clinical indication
-        self.text_encoder = AutoModel.from_pretrained(text_encoder_name)
+        if pretrained:
+            self.text_encoder = AutoModel.from_pretrained(text_encoder_name)
+        else:
+            from transformers import AutoConfig, AutoModel
+            self.text_encoder = AutoModel.from_config(AutoConfig.from_pretrained(text_encoder_name))
         text_hidden = self.text_encoder.config.hidden_size
         self.text_proj = nn.Linear(text_hidden, hidden_dim)
         
@@ -45,10 +50,14 @@ class CognitiveReportGenerator(nn.Module):
         self.disease_proj = nn.Linear(num_diseases, hidden_dim)
         
         # Report decoder
-        self.decoder = GPT2LMHeadModel.from_pretrained(
-            decoder_name,
-            add_cross_attention=True
-        )
+        if pretrained:
+            self.decoder = GPT2LMHeadModel.from_pretrained(
+                decoder_name,
+                add_cross_attention=True
+            )
+        else:
+            decoder_config = GPT2Config.from_pretrained(decoder_name, add_cross_attention=True)
+            self.decoder = GPT2LMHeadModel(decoder_config)
         # Enable gradient checkpointing for memory efficiency
         self.decoder.gradient_checkpointing_enable()
         
