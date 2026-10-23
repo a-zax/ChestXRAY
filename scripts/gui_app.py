@@ -257,6 +257,54 @@ def caption_icon(kind, color="#475467"):
     return QIcon(pixmap)
 
 
+def action_icon(kind, color="#475467"):
+    """Draw a compact, consistent line icon for common workspace actions."""
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), 1.8)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    if kind == "image":
+        painter.drawRoundedRect(3, 4, 18, 16, 3, 3)
+        painter.drawEllipse(7, 7, 2.5, 2.5)
+        painter.drawLine(5, 17, 10, 12)
+        painter.drawLine(10, 12, 13, 15)
+        painter.drawLine(13, 15, 17, 11)
+        painter.drawLine(17, 11, 20, 14)
+    elif kind == "model":
+        # A small neural-network mark reads as a model without looking like a gear.
+        painter.drawLine(6, 7, 12, 12)
+        painter.drawLine(6, 17, 12, 12)
+        painter.drawLine(12, 12, 18, 7)
+        painter.drawLine(12, 12, 18, 17)
+        painter.setBrush(QColor("#ffffff"))
+        for cx, cy in ((5, 6), (5, 18), (12, 12), (19, 6), (19, 18)):
+            painter.drawEllipse(cx - 2, cy - 2, 4, 4)
+    elif kind == "reset":
+        reset_path = QPainterPath()
+        reset_path.moveTo(18.5, 8.5)
+        reset_path.cubicTo(16.5, 5.5, 13.5, 4.5, 10.5, 5.5)
+        reset_path.cubicTo(6.5, 6.5, 4.5, 10.5, 5.5, 14.5)
+        reset_path.cubicTo(6.5, 18.5, 10.5, 20, 14, 18.5)
+        painter.drawPath(reset_path)
+        painter.drawLine(18.5, 8.5, 14.5, 8)
+        painter.drawLine(18.5, 8.5, 18, 12.5)
+    elif kind == "copy":
+        painter.drawRoundedRect(8, 4, 12, 14, 2, 2)
+        painter.drawRoundedRect(4, 8, 12, 12, 2, 2)
+    elif kind == "play":
+        painter.setBrush(QColor(color))
+        painter.drawPolygon(QPolygon([QPoint(8, 5), QPoint(19, 12), QPoint(8, 19)]))
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 class RadiologyLogo(QWidget):
     """Original chest-radiograph mark drawn directly with PySide6 painting."""
 
@@ -900,11 +948,15 @@ class MainWindow(QMainWindow):
         self.loader_progress.setVisible(False)
         topbar.addWidget(self.loader_progress)
         self.load_model_btn = QPushButton("Load model")
+        self.load_model_btn.setIcon(action_icon("model"))
+        self.load_model_btn.setIconSize(QSize(17, 17))
         self.load_model_btn.setObjectName("Secondary")
         self.load_model_btn.setToolTip("Choose a trained checkpoint (.pth) to enable analysis")
         self.load_model_btn.clicked.connect(self.load_model_dialog)
         topbar.addWidget(self.load_model_btn)
         self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setIcon(action_icon("reset"))
+        self.reset_btn.setIconSize(QSize(16, 16))
         self.reset_btn.setObjectName("Ghost")
         self.reset_btn.setToolTip("Clear the image, results and clinical context")
         self.reset_btn.clicked.connect(self.reset_ui)
@@ -950,6 +1002,8 @@ class MainWindow(QMainWindow):
         self.run_blocker.setWordWrap(True)
         actions.addWidget(self.run_blocker, 1)
         self.generate_btn = QPushButton("Run analysis")
+        self.generate_btn.setIcon(action_icon("play", "#ffffff"))
+        self.generate_btn.setIconSize(QSize(17, 17))
         self.generate_btn.setObjectName("PrimaryAction")
         self.generate_btn.setMinimumWidth(186)
         self.generate_btn.setFixedHeight(46)
@@ -1039,6 +1093,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.image_meta_label)
 
         self.load_image_btn = QPushButton("Choose image")
+        self.load_image_btn.setIcon(action_icon("image"))
+        self.load_image_btn.setIconSize(QSize(17, 17))
         self.load_image_btn.setObjectName("Secondary")
         self.load_image_btn.setToolTip("Browse for a chest X-ray (Ctrl+O)")
         self.load_image_btn.clicked.connect(self.load_image_dialog)
@@ -1100,6 +1156,8 @@ class MainWindow(QMainWindow):
         head.addWidget(self.report_label)
         head.addStretch(1)
         self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setIcon(action_icon("copy"))
+        self.copy_btn.setIconSize(QSize(16, 16))
         self.copy_btn.setObjectName("Ghost")
         self.copy_btn.setProperty("size", "small")
         self.copy_btn.setStyleSheet("padding: 4px 12px; font-size: 12px;")
