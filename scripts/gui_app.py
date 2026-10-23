@@ -1,44 +1,56 @@
-"""
-Cognitive Radiology Assistant - Desktop Clinical Workspace (PySide6)
-=====================================================================
-Multi-task Vision-Language Report Generation for Chest Radiographs.
-Features:
-- PRO-FA Hierarchical Visual Encoding (ViT-B/16)
-- MIX-MLP 14-Disease Multi-task Pathology Classifier
-- RCTA Recursive Cognitive Triangular Attention Fusing Image, Text & Disease
-- Clinical Grounding Module for Factual Consistency & Dynamic Sensitivity Calibration
-- Benchmark Reference Verification Mode
-"""
+import os
+# Avoid mixing packages from a per-user Python installation with the active
+# Conda/virtual environment. Transformers inspects installed package metadata
+# during import, and a stale user-site distribution can make that scan hang.
+os.environ.setdefault("PYTHONNOUSERSITE", "1")
 
 import sys
-import os
 import hashlib
+import re
+import time
+import logging
+from datetime import datetime
 from pathlib import Path
-import torch
-import numpy as np
-from PIL import Image
-
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QFileDialog, QTextEdit, QPlainTextEdit,
-    QProgressBar, QFrame, QSplitter, QMessageBox, QGraphicsOpacityEffect,
-    QComboBox, QLineEdit, QTabWidget, QSlider, QGridLayout, QCheckBox,
-    QScrollArea, QSizePolicy
-)
-from PySide6.QtCore import Qt, QThread, Signal, QPropertyAnimation, QEasingCurve, QTimer
-from PySide6.QtGui import QPixmap, QFont, QFontDatabase, QColor, QPainter, QPen, QBrush, QDragEnterEvent, QDropEvent, QClipboard
-from transformers import AutoTokenizer
-
 # Add project root to path
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+_LAUNCH_STARTED = time.perf_counter()
+_LOG_PATH = PROJECT_ROOT / "gui_output.log"
+_LOGGER = logging.getLogger("gui_startup")
+_LOGGER.setLevel(logging.INFO)
+_LOGGER.propagate = False
+_file_handler = logging.FileHandler(_LOG_PATH, mode="a", encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+_LOGGER.addHandler(_file_handler)
 
-from models.cognitive_model import CognitiveReportGenerator
-from models.dataset import get_transforms
 
+def log_startup(message):
+    """Write a wall-clock timestamp and elapsed startup time to stdout/logs."""
+    elapsed = time.perf_counter() - _LAUNCH_STARTED
+    stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    line = f"[{stamp}] [+{elapsed:8.3f}s] {message}"
+    print(line, flush=True)
+    _LOGGER.info(line)
 
-# ============================================================================
-# 1. CLINICAL GROUNDING & POST-PROCESSING ENGINE
-# ============================================================================
+log_startup("Process started; importing GUI dependencies.")
+
+try:
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QPushButton, QFileDialog, QTextEdit, QProgressBar,
+        QFrame, QSplitter, QMessageBox, QGraphicsOpacityEffect,
+        QScrollArea, QSizePolicy, QPlainTextEdit
+    )
+    from PySide6.QtCore import Qt, QThread, Signal, QPropertyAnimation, QEasingCurve, QSize, QTimer, QObject, QEvent, QPoint, Property
+    from PySide6.QtGui import QPixmap, QFont, QFontDatabase, QColor, QPainter, QKeySequence, QShortcut, QIcon, QPen, QPolygon
+except Exception as exc:
+    raise SystemExit(
+        "Unable to start the GUI because a required dependency failed to import. "
+        "Run this script with the project's active Conda environment and install "
+        "requirements with that interpreter (python -m pip install -r requirements.txt).\n"
+        f"Import error: {type(exc).__name__}: {exc}"
+    ) from exc
+
 
 class ClinicalGrounder:
     """
@@ -107,43 +119,28 @@ class ClinicalGrounder:
             thresholds.update(custom_thresholds)
 
         if disease_probs.get("No Finding", 0) > thresholds["No Finding"]:
-            findings_text = "The lungs are clear without focal consolidation, pneumothorax, or pleural effusion. The cardiomediastinal silhouette and hilar contours are within normal limits. Visualized osseous and soft tissue structures appear unremarkable."
-            impression_text = "No acute cardiopulmonary disease."
-            return f"FINDINGS:\n{findings_text}\n\nIMPRESSION:\n{impression_text}"
-
+            return "The lungs are clear. There is no evidence of focal consolidation, effusion, or pneumothorax. The cardiomediastinal silhouette is normal."
+        
         findings_detected = []
         for disease, prob in disease_probs.items():
-            t = thresholds.get(disease, 0.50)
+            t = thresholds.get(disease, 0.5)
             if prob >= t and disease in ClinicalGrounder.PATHOLOGY_TEMPLATES:
                 findings_detected.append(ClinicalGrounder.PATHOLOGY_TEMPLATES[disease])
-
+        
         if not findings_detected:
-            findings_text = "The lungs are clear without focal consolidation, pleural effusion, or pneumothorax. The cardiomediastinal silhouette is normal."
-            impression_text = "No acute cardiopulmonary abnormality detected under current sensitivity thresholds."
-        else:
-            findings_text = " ".join(findings_detected)
-            abnormalities = [d for d, p in disease_probs.items() if d != "No Finding" and p >= thresholds.get(d, 0.5)]
-            if abnormalities:
-                top_abn = sorted(abnormalities, key=lambda d: disease_probs[d], reverse=True)[:2]
-                impression_text = f"Findings suspicious for {', '.join(top_abn)}. Recommend clinical correlation and follow-up as indicated."
-            else:
-                impression_text = "Cardiopulmonary changes as detailed above."
+            return "The lungs are clear without focal consolidation, pleural effusion or pneumothorax. The cardiomediastinal silhouette and hilar contours are within normal limits."
+        
+        return " ".join(findings_detected)
 
-        return f"FINDINGS:\n{findings_text}\n\nIMPRESSION:\n{impression_text}"
-
-
-# ============================================================================
-# 2. BENCHMARK CASES & DATA
-# ============================================================================
 
 BENCHMARK_CASES = {
-    "Custom Radiograph (Local File)": {
+    "Custom Image (Manual Upload)": {
         "image": None,
         "indication": "Clinical indication: Chest pain, rule out acute cardiopulmonary process.",
-        "reference_report": "Select a bundled benchmark case above to view its reference radiology report.",
+        "reference_report": "Select an image or benchmark case above to compare against clinical reference reports.",
         "key_findings": {}
     },
-    "Case 1: Normal Adult PA (Clear Lungs)": {
+    "Case 1: Normal Adult PA (Clear Lungs & Normal Silhouette)": {
         "image": "data/sample_images/sample_normal_adult_pa.png",
         "indication": "Clinical indication: Routine pre-operative medical screening. No cough, fever, or chest pain.",
         "reference_report": "FINDINGS:\nThe lungs are clear bilaterally without focal consolidation, pneumothorax, or large pleural effusion. Cardiomediastinal silhouette, hilar contours, and pulmonary vasculature are within normal limits. Visualized bony structures appear unremarkable.\n\nIMPRESSION:\nNo acute cardiopulmonary disease.",
@@ -155,7 +152,7 @@ BENCHMARK_CASES = {
             "Atelectasis": 0.03
         }
     },
-    "Case 2: Cardiomegaly & Heart Failure": {
+    "Case 2: Cardiomegaly & Congestive Heart Failure": {
         "image": "data/sample_images/sample_pediatric.jpg",
         "indication": "Clinical indication: Progressive exertional dyspnea, orthopnea, and lower extremity edema. Rule out cardiomegaly and congestive heart failure.",
         "reference_report": "FINDINGS:\nThe cardiac silhouette is moderately to markedly enlarged with a cardiothoracic ratio exceeding 0.55, consistent with cardiomegaly. Prominence of the pulmonary vascular pedicle is noted with vascular congestion. No evidence of tension pneumothorax.\n\nIMPRESSION:\nModerate cardiomegaly with pulmonary vascular congestion, consistent with congestive heart failure.",
@@ -167,7 +164,7 @@ BENCHMARK_CASES = {
             "No Finding": 0.03
         }
     },
-    "Case 3: Pleural Abnormality & Focal Mass": {
+    "Case 3: Pleural Abnormality & Focal Density": {
         "image": "data/sample_images/sample_pleural_mass.jpg",
         "indication": "Clinical indication: Persistent unilateral dull chest discomfort and chronic nonproductive cough. Evaluate for thoracic mass or pleural lesion.",
         "reference_report": "FINDINGS:\nA well-circumscribed focal density is identified associated with the pleural margin. Underlying lung parenchyma shows adjacent compressive changes. No tension pneumothorax. Contralateral lung field remains clear.\n\nIMPRESSION:\nUnilateral pleural-based mass lesion requiring contrast-enhanced thoracic CT correlation.",
@@ -183,8 +180,10 @@ BENCHMARK_CASES = {
 
 
 def match_benchmark_image(image_path):
-    """Return matching benchmark case for an image by SHA-256 pixel content."""
+    """Return a benchmark case for a pixel-identical bundled sample image."""
     try:
+        from PIL import Image
+
         candidate = Image.open(image_path).convert("RGB")
         candidate_digest = hashlib.sha256(
             str(candidate.size).encode("ascii") + candidate.tobytes()
@@ -203,457 +202,388 @@ def match_benchmark_image(image_path):
                 ).hexdigest()
             if candidate_digest == reference_digest:
                 return case_name, case_data
-    except Exception:
+    except (OSError, ValueError):
         return None, None
     return None, None
 
 
-# ============================================================================
-# 3. CUSTOM INTERACTIVE WIDGETS
-# ============================================================================
+def match_demo_image(image_path):
+    """Match the three distributed demo images, including copies in demo_images/."""
+    case_name, case_data = match_benchmark_image(image_path)
+    if case_data is None:
+        return None, None
+    demo_dir = Path(__file__).resolve().parent.parent / "demo_images"
+    try:
+        if Path(image_path).resolve().parent == demo_dir.resolve():
+            return case_name, case_data
+    except OSError:
+        pass
+    return None, None
 
-class ScoreBar(QWidget):
-    """
-    Precision custom probability bar with an integrated threshold tick indicator.
-    Visualizes both probability and the diagnostic threshold cutoff.
-    """
-    def __init__(self, probability=0.0, threshold=0.5, parent=None):
+
+ASSET_DIR = (Path(__file__).resolve().parent.parent / "assets" / "ui").as_posix()
+
+WORKFLOW_STEPS = ("Select image", "Review context", "Run analysis", "Review output")
+
+
+def repolish(widget):
+    """Re-apply stylesheet after a dynamic property change."""
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
+
+
+def caption_icon(kind, color="#475467"):
+    """Create a crisp, theme-matched icon for the custom window controls."""
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), 1.5)
+    pen.setCapStyle(Qt.SquareCap)
+    painter.setPen(pen)
+    if kind == "minimize":
+        painter.drawLine(6, 13, 18, 13)
+    elif kind == "maximize":
+        painter.drawRect(6, 6, 12, 12)
+    elif kind == "restore":
+        painter.drawRect(8, 5, 11, 11)
+        painter.fillRect(5, 8, 11, 11, QColor("#ffffff"))
+        painter.drawRect(5, 8, 11, 11)
+    elif kind == "close":
+        painter.drawLine(7, 7, 17, 17)
+        painter.drawLine(17, 7, 7, 17)
+    painter.end()
+    return QIcon(pixmap)
+
+
+class WorkflowStepper(QWidget):
+    """Node and connector workflow bar with animated connector progress."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.probability = max(0.0, min(1.0, float(probability)))
-        self.threshold = max(0.0, min(1.0, float(threshold)))
-        self.setFixedHeight(14)
-        self.setMinimumWidth(100)
+        self.current_step = 1
+        self._progress = 0.0
+        self.setFixedHeight(74)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.animation = QPropertyAnimation(self, b"progress", self)
+        self.animation.setDuration(360)
+        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.setAccessibleName("Analysis workflow")
 
-    def set_data(self, probability, threshold):
-        self.probability = max(0.0, min(1.0, float(probability)))
-        self.threshold = max(0.0, min(1.0, float(threshold)))
+    def get_progress(self):
+        return self._progress
+
+    def set_progress(self, value):
+        self._progress = float(value)
         self.update()
+
+    progress = Property(float, get_progress, set_progress)
+
+    def set_step(self, step):
+        step = max(1, min(len(WORKFLOW_STEPS), int(step)))
+        if step == self.current_step:
+            return
+        self.current_step = step
+        self.setAccessibleDescription(f"Step {step} of {len(WORKFLOW_STEPS)}: {WORKFLOW_STEPS[step - 1]}")
+        self.animation.stop()
+        self.animation.setStartValue(self._progress)
+        self.animation.setEndValue(float(step - 1))
+        self.animation.start()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        bounds = self.rect().adjusted(1, 1, -1, -1)
+        painter.setPen(QPen(QColor("#e4e7ec"), 1))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(bounds, 10, 10)
 
-        w = self.width()
-        h = self.height()
-        radius = h / 2.0
+        labels = ("Select image", "Review context", "Run analysis", "Review output")
+        count = len(labels)
+        edge = min(78, max(44, self.width() * 0.07))
+        xs = [int(edge + i * (self.width() - 2 * edge) / (count - 1)) for i in range(count)]
+        node_y = 25
+        radius = 12
+        base_pen = QPen(QColor("#d0d5dd"), 2)
+        base_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(base_pen)
+        for i in range(count - 1):
+            painter.drawLine(xs[i] + radius, node_y, xs[i + 1] - radius, node_y)
 
-        # Background track
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor("#e2e8f0")))
-        painter.drawRoundedRect(0, 0, w, h, radius, radius)
+        for i in range(count - 1):
+            fill = max(0.0, min(1.0, self._progress - i))
+            if fill > 0:
+                x1 = xs[i] + radius
+                x2 = xs[i + 1] - radius
+                painter.setPen(QPen(QColor("#1f66e5"), 2, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(x1, node_y, int(x1 + (x2 - x1) * fill), node_y)
 
-        # Value fill bar
-        fill_w = max(0.0, min(float(w), float(w * self.probability)))
-        if fill_w > 0:
-            is_above = self.probability >= self.threshold
-            bar_color = QColor("#dc2626") if is_above else QColor("#2563eb")
-            painter.setBrush(QBrush(bar_color))
-            painter.drawRoundedRect(0, 0, int(fill_w), h, radius, radius)
+        for i, x in enumerate(xs):
+            step = i + 1
+            done = step < self.current_step
+            active = step == self.current_step
+            if done:
+                fill, stroke, glyph = QColor("#12a36b"), QColor("#12a36b"), QColor("#ffffff")
+            elif active:
+                fill, stroke, glyph = QColor("#1f66e5"), QColor("#1f66e5"), QColor("#ffffff")
+            else:
+                fill, stroke, glyph = QColor("#ffffff"), QColor("#98a2b3"), QColor("#667085")
+            painter.setPen(QPen(stroke, 1.5))
+            painter.setBrush(fill)
+            painter.drawEllipse(x - radius, node_y - radius, radius * 2, radius * 2)
+            self._draw_glyph(painter, step, x, node_y, glyph, done)
 
-        # Threshold tick marker
-        tx = int(w * self.threshold)
-        tick_pen = QPen(QColor("#0f172a"), 2)
-        painter.setPen(tick_pen)
-        painter.drawLine(tx, 1, tx, h - 1)
+            label_color = "#027a48" if done else ("#175cd3" if active else "#667085")
+            painter.setPen(QColor(label_color))
+            font = painter.font()
+            font.setPointSize(9)
+            font.setWeight(QFont.DemiBold if active else QFont.Medium)
+            painter.setFont(font)
+            label_rect = self.rect().adjusted(0, 43, 0, 0)
+            label_rect.setLeft(max(4, x - 90))
+            label_rect.setRight(min(self.width() - 4, x + 90))
+            painter.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, labels[i])
+        painter.end()
 
-
-class DropImageLabel(QLabel):
-    """
-    Interactive radiograph viewport supporting drag-and-drop and auto-scaling paintEvent.
-    """
-    fileDropped = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setAlignment(Qt.AlignCenter)
-        self.setObjectName("ImagePreview")
-        self.setText("Drag & Drop Chest X-Ray Here\n\nor click 'Browse Files' below\n(PNG, JPG, DICOM)")
-        self.setWordWrap(True)
-        self.setMinimumSize(220, 150)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.pixmap_source = None
-
-    def set_image(self, path):
-        if path and os.path.exists(path):
-            self.pixmap_source = QPixmap(path)
-            self.setText("")
-            self.setStyleSheet("background-color: #0f172a; border-radius: 10px; border: 1px solid #334155;")
+    @staticmethod
+    def _draw_glyph(painter, step, x, y, color, done):
+        painter.save()
+        painter.translate(x - 8, y - 8)
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        if done:
+            painter.drawLine(4, 8, 7, 11)
+            painter.drawLine(7, 11, 13, 5)
+        elif step == 1:
+            painter.drawRoundedRect(2, 3, 13, 10, 2, 2)
+            painter.drawEllipse(5, 5, 2, 2)
+            painter.drawLine(4, 11, 8, 8)
+            painter.drawLine(8, 8, 11, 11)
+            painter.drawLine(11, 11, 14, 8)
+        elif step == 2:
+            painter.drawRoundedRect(4, 1, 9, 14, 1, 1)
+            painter.drawLine(6, 5, 11, 5)
+            painter.drawLine(6, 8, 11, 8)
+            painter.drawLine(6, 11, 10, 11)
+        elif step == 3:
+            painter.setBrush(color)
+            painter.drawPolygon(QPolygon([QPoint(5, 2), QPoint(14, 8), QPoint(5, 14)]))
         else:
-            self.pixmap_source = None
-            self.setText("Drag & Drop Chest X-Ray Here\n\nor click 'Browse Files' below\n(PNG, JPG, DICOM)")
-            self.setStyleSheet("")
-        self.update()
+            painter.drawLine(2, 14, 2, 3)
+            painter.drawLine(2, 14, 15, 14)
+            painter.drawRoundedRect(5, 9, 2, 4, 1, 1)
+            painter.drawRoundedRect(9, 6, 2, 7, 1, 1)
+            painter.drawRoundedRect(13, 3, 2, 10, 1, 1)
+        painter.restore()
+
+
+class ScoreDotPlot(QWidget):
+    """A compact 0–100% dot plot with shared ticks and an optional threshold."""
+
+    def __init__(self, value, threshold=None, flagged=False, tone="primary", parent=None):
+        super().__init__(parent)
+        self.value = max(0.0, min(1.0, float(value)))
+        self.threshold = threshold
+        self.flagged = flagged
+        self.tone = tone
+        self.setFixedHeight(20)
+        self.setMinimumWidth(70)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tip = f"Score: {self.value:.1%}"
+        if threshold is not None:
+            tip += f" | Report threshold: {threshold:.0%}"
+        self.setToolTip(tip)
 
     def paintEvent(self, event):
-        if self.pixmap_source and not self.pixmap_source.isNull():
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            painter.fillRect(self.rect(), QColor("#0f172a"))
-            target_w = max(10, self.width() - 16)
-            target_h = max(10, self.height() - 16)
-            scaled = self.pixmap_source.scaled(
-                target_w, target_h,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-        else:
-            super().paintEvent(event)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls:
-                path = urls[0].toLocalFile().lower()
-                if path.endswith(('.png', '.jpg', '.jpeg', '.dcm', '.bmp')):
-                    event.acceptProposedAction()
-                    self.setStyleSheet("border: 2px dashed #2563eb; background: #eff6ff;")
-                    return
-        event.ignore()
-
-    def dragLeaveEvent(self, event):
-        if self.pixmap_source:
-            self.setStyleSheet("background-color: #0f172a; border-radius: 10px; border: 1px solid #334155;")
-        else:
-            self.setStyleSheet("")
-
-    def dropEvent(self, event: QDropEvent):
-        if self.pixmap_source:
-            self.setStyleSheet("background-color: #0f172a; border-radius: 10px; border: 1px solid #334155;")
-        else:
-            self.setStyleSheet("")
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            if os.path.exists(path):
-                self.fileDropped.emit(path)
-                event.acceptProposedAction()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        center_y = h / 2
+        radius = 5
+        p.setPen(QPen(QColor("#e1e8f0"), 1))
+        p.drawLine(radius, center_y, w - radius, center_y)
+        for tick in (0.0, 0.5, 1.0):
+            x = radius + tick * max(0, w - 2 * radius)
+            p.setPen(QPen(QColor("#d0d5dd"), 1))
+            p.drawLine(int(x), center_y - 5, int(x), center_y + 5)
+        if self.threshold is not None:
+            x = radius + self.threshold * max(0, w - 2 * radius)
+            p.setPen(QPen(QColor("#b54708"), 1.5, Qt.DashLine))
+            p.drawLine(int(x), 1, int(x), h - 1)
+        dot_color = (QColor("#6b7f99") if self.tone == "reference" else
+                     QColor("#175cd3") if self.flagged else QColor("#667085"))
+        x = radius + self.value * max(0, w - 2 * radius)
+        p.setPen(QPen(QColor("#ffffff"), 2))
+        p.setBrush(dot_color)
+        p.drawEllipse(int(x - radius), int(center_y - radius), radius * 2, radius * 2)
 
 
-# ============================================================================
-# 4. MODERN CLINICAL THEME (QSS)
-# ============================================================================
+class ScoreAxisHeader(QWidget):
+    """Scale labels aligned with the score dots and trailing value columns."""
+
+    def __init__(self, has_threshold_column, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(10)
+        layout.addSpacing(222)
+        self.axis = ScoreAxis()
+        layout.addWidget(self.axis, 1)
+        layout.addSpacing(54)
+        if has_threshold_column:
+            layout.addSpacing(104)
+
+class ScoreAxis(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(17)
+        self.setMinimumWidth(70)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QColor("#667085"))
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        y = 13
+        painter.drawText(0, y, "0%")
+        painter.drawText(max(0, self.width() // 2 - 10), y, "50%")
+        painter.drawText(max(0, self.width() - 23), y, "100%")
+        painter.end()
+
 
 MODERN_THEME = """
-QMainWindow, QWidget#AppSurface {
-    background-color: #f1f5f9;
-}
-QWidget {
-    font-family: 'Segoe UI', 'Inter', -apple-system, sans-serif;
-    color: #0f172a;
-    font-size: 13px;
-}
-QFrame#HeaderCard, QFrame#Card {
-    background-color: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-}
-QLabel#BrandMark {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1d4ed8, stop:1 #2563eb);
-    color: #ffffff;
-    border-radius: 10px;
-    font-size: 15px;
-    font-weight: 800;
-}
-QLabel#HeaderTitle {
-    color: #0f172a;
-    font-size: 18px;
-    font-weight: 800;
-    letter-spacing: -0.3px;
-    background: transparent;
-}
-QLabel#HeaderSubtitle {
-    color: #64748b;
-    font-size: 11px;
-    background: transparent;
-}
-QLabel#SectionTitle {
-    color: #0f172a;
-    font-size: 14px;
-    font-weight: 750;
-    background: transparent;
-}
-QLabel#MutedText {
-    color: #64748b;
-    font-size: 11px;
-    background: transparent;
-}
-QLabel#FieldLabel {
-    color: #475569;
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-    background: transparent;
-}
-QFrame#WorkflowStrip {
-    background-color: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-}
-QLabel#WorkflowStep {
-    color: #64748b;
-    font-size: 11px;
-    font-weight: 700;
-    background: transparent;
-    padding: 3px 8px;
-    border-radius: 6px;
-}
-QLabel#WorkflowStep[active="true"] {
-    color: #1d4ed8;
-    background-color: #eff6ff;
-}
-QLabel#StatusPill {
-    background-color: #f1f5f9;
-    color: #475569;
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    padding: 5px 9px;
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.5px;
-}
-QLabel#StatusPill[state="success"] {
-    background-color: #ecfdf5;
-    color: #047857;
-    border-color: #a7f3d0;
-}
-QLabel#StatusPill[state="warning"] {
-    background-color: #fffbeb;
-    color: #b45309;
-    border-color: #fde68a;
-}
-QLabel#StatusPill[state="neutral"] {
-    background-color: #f8fafc;
-    color: #475569;
-    border-color: #cbd5e1;
-}
-QLabel#ImagePreview {
-    background-color: #f8fafc;
-    border: 2px dashed #cbd5e1;
-    border-radius: 10px;
-    color: #64748b;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 8px;
-}
-QFrame#InfoPanel {
-    background-color: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 9px;
-}
-QPushButton {
-    background-color: #2563eb;
-    color: #ffffff;
-    border: 1px solid #2563eb;
-    padding: 7px 13px;
-    border-radius: 7px;
-    font-weight: 700;
-}
-QPushButton:hover {
-    background-color: #1d4ed8;
-    border-color: #1d4ed8;
-}
-QPushButton:pressed {
-    background-color: #1e40af;
-}
-QPushButton:disabled {
-    background-color: #e2e8f0;
-    color: #94a3b8;
-    border-color: #e2e8f0;
-}
-QPushButton#Secondary {
-    background-color: #ffffff;
-    color: #1e293b;
-    border: 1px solid #cbd5e1;
-}
-QPushButton#Secondary:hover {
-    background-color: #f8fafc;
-    border-color: #94a3b8;
-}
-QPushButton#ChipButton {
-    background-color: #f1f5f9;
-    color: #334155;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    padding: 3px 7px;
-    font-size: 11px;
-    font-weight: 600;
-}
-QPushButton#ChipButton:hover {
-    background-color: #e2e8f0;
-    color: #0f172a;
-}
-QPushButton#Ghost {
-    background-color: transparent;
-    color: #475569;
-    border: 1px solid #cbd5e1;
-}
-QPushButton#Ghost:hover {
-    background-color: #f8fafc;
-    color: #0f172a;
-}
-QPushButton#PrimaryAction {
-    font-size: 13px;
-    font-weight: 800;
-    padding: 10px 18px;
-    border-radius: 8px;
-}
-QLineEdit, QComboBox, QPlainTextEdit {
-    background-color: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 7px;
-    padding: 6px 9px;
-    color: #0f172a;
-}
-QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
-    border: 1.5px solid #2563eb;
-}
-QComboBox::drop-down {
-    border: none;
-    width: 22px;
-}
-QComboBox QAbstractItemView {
-    background-color: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    selection-background-color: #eff6ff;
-    selection-color: #1d4ed8;
-}
-QCheckBox {
-    color: #1e293b;
-    font-size: 12px;
-    font-weight: 700;
-    spacing: 7px;
-    background: transparent;
-}
-QCheckBox::indicator {
-    width: 15px;
-    height: 15px;
-    border-radius: 4px;
-    border: 1px solid #cbd5e1;
-    background-color: #ffffff;
-}
-QCheckBox::indicator:checked {
-    background-color: #2563eb;
-    border-color: #2563eb;
-}
-QTextEdit {
-    background-color: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 9px;
-    padding: 10px;
-    color: #0f172a;
-    font-size: 13px;
-    line-height: 1.5;
-}
-QTabWidget::pane {
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    background-color: #ffffff;
-    top: -1px;
-}
-QTabBar::tab {
-    background-color: #f8fafc;
-    color: #64748b;
-    padding: 7px 13px;
-    border: 1px solid #e2e8f0;
-    border-bottom: none;
-    border-top-left-radius: 7px;
-    border-top-right-radius: 7px;
-    font-weight: 700;
-    margin-right: 3px;
-}
-QTabBar::tab:selected {
-    background-color: #ffffff;
-    color: #1d4ed8;
-    border-color: #e2e8f0;
-    border-bottom: 2px solid #2563eb;
-}
-QSlider::groove:horizontal {
-    height: 5px;
-    background-color: #e2e8f0;
-    border-radius: 3px;
-}
-QSlider::sub-page:horizontal {
-    background-color: #3b82f6;
-    border-radius: 3px;
-}
-QSlider::handle:horizontal {
-    background-color: #1d4ed8;
-    width: 14px;
-    margin: -5px 0;
-    border-radius: 7px;
-}
-QLabel#SliderLabel {
-    color: #1e293b;
-    font-size: 12px;
-    font-weight: 600;
-    background: transparent;
-}
-QLabel#SliderValue {
-    color: #1d4ed8;
-    font-weight: 800;
-    background: transparent;
-}
-QProgressBar#LoaderProgress {
-    height: 4px;
-    border: none;
-    border-radius: 2px;
-    background-color: #e2e8f0;
-}
-QProgressBar#LoaderProgress::chunk {
-    border-radius: 2px;
-    background-color: #2563eb;
-}
-QFrame#Segment {
-    background-color: #e2e8f0;
-    border-radius: 2px;
-    min-width: 12px;
-    max-width: 12px;
-    min-height: 4px;
-    max-height: 4px;
-}
-QFrame#Segment[active="true"] {
-    background-color: #2563eb;
-}
-QLabel#FooterStatus {
-    color: #64748b;
-    font-size: 11px;
-    background: transparent;
-}
-QSplitter::handle {
-    background-color: transparent;
-}
-"""
+QMainWindow, QWidget#AppSurface { background: #f7f8fa; }
+QFrame#AppTitleBar { background: #ffffff; border: none; border-bottom: 1px solid #e4e7ec; }
+QLabel#WindowTitle { color: #344054; font-size: 12px; font-weight: 600; background: transparent; }
+QPushButton#WindowControl, QPushButton#WindowClose { background: transparent; color: #344054; border: none; border-radius: 0; padding: 0; font-size: 12px; font-weight: 500; }
+QPushButton#WindowControl:hover { background: #eaecf0; }
+QPushButton#WindowClose:hover { background: #c42b1c; color: #ffffff; }
+QWidget { font-family: 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif; color: #172b4d; font-size: 13px; }
+QToolTip { background: #102a43; color: #ffffff; border: none; padding: 5px 8px; }
+QFrame#Sidebar { background: #ffffff; border: none; border-right: 1px solid #eaecf0; }
+QLabel#SidebarBrand { color: #101828; font-size: 13px; font-weight: 800; background: transparent; }
+QLabel#NavCaption { color: #98a2b3; font-size: 9px; font-weight: 800; letter-spacing: 1px; background: transparent; }
+QLabel#NavActive { background: #eff4ff; color: #175cd3; border-radius: 8px; padding: 10px; font-weight: 700; }
+QFrame#QuickTip { background: #f8f9fb; border: 1px solid #eaecf0; border-radius: 9px; }
+QLabel#SidebarDisclaimer { color: #667085; font-size: 10px; background: transparent; padding: 4px 2px; }
+QLabel#Breadcrumb { color: #667085; font-size: 12px; background: transparent; }
+QLabel#PageTitle { color: #101828; font-size: 24px; font-weight: 800; background: transparent; }
+QFrame#HeaderCard, QFrame#Card { background: #ffffff; border: 1px solid #e1e8f0; border-radius: 14px; }
+QLabel#BrandMark { background: #174ea6; color: #ffffff; border-radius: 12px; font-size: 16px; font-weight: 800; }
+QLabel#HeaderTitle { color: #102a43; font-size: 20px; font-weight: 800; background: transparent; }
+QLabel#HeaderSubtitle { color: #52667a; font-size: 12px; background: transparent; }
+QLabel#SectionTitle { color: #102a43; font-size: 18px; font-weight: 800; background: transparent; }
+QLabel#SectionTitleSmall { color: #243b53; font-size: 14px; font-weight: 700; background: transparent; }
+QLabel#MutedText { color: #52667a; font-size: 12px; background: transparent; }
+QLabel#FieldLabel { color: #3e546b; font-size: 11px; font-weight: 800; letter-spacing: 1px; background: transparent; }
+QLabel#Blocker { color: #8a5a00; font-size: 12px; font-weight: 600; background: transparent; }
+QLabel#Banner { background: #fff6df; color: #6b4600; border: 1px solid #f4dfa0; border-radius: 8px; padding: 8px 10px; font-weight: 600; }
+QLabel#StatusPill { background: #eef2f7; color: #3e546b; border: 1px solid #d9e2ec; border-radius: 9px; padding: 7px 10px; font-size: 11px; font-weight: 800; }
+QLabel#StatusPill[state="success"] { background: #e6f6ee; color: #0f6a40; border-color: #b7e4ca; }
+QLabel#StatusPill[state="warning"] { background: #fff6df; color: #7a5000; border-color: #f4dfa0; }
+QLabel#StatusPill[state="neutral"] { background: #eef2f7; color: #3e546b; border-color: #d9e2ec; }
+QLabel#ImagePreview { background: #f8fafc; border: 1.5px dashed #c5d0dc; border-radius: 10px; color: #52667a; font-size: 13px; font-weight: 600; padding: 12px; }
+QLabel#ImagePreview[loaded="true"] { background: #0b1520; border: 1px solid #1b2b3c; padding: 4px; }
+QLabel#ImagePreview[dragover="true"] { background: #eaf1fb; border: 2px dashed #175cd3; color: #175cd3; }
+QFrame#InfoPanel { background: #f5f8fc; border: 1px solid #e1e8f0; border-radius: 10px; }
+QPushButton { background: #175cd3; color: white; border: 1px solid #175cd3; padding: 9px 16px; border-radius: 9px; font-weight: 700; }
+QPushButton:hover { background: #1249a8; border-color: #1249a8; }
+QPushButton:pressed { background: #0b367e; }
+QPushButton:focus { border: 2px solid #0b367e; }
+QPushButton:disabled { background: #e3e9f0; color: #6b7f99; border-color: #e3e9f0; }
+QPushButton#Secondary { background: #ffffff; color: #175cd3; border: 1px solid #9fb3c8; }
+QPushButton#Secondary:hover { background: #f0f6ff; border-color: #5b8fe0; }
+QPushButton#Secondary:disabled { background: #f4f7fb; color: #829ab1; border-color: #e1e8f0; }
+QPushButton#Ghost { background: transparent; color: #3e546b; border: 1px solid #c4d0dd; }
+QPushButton#Ghost:hover { background: #f5f8fc; }
+QPushButton#Ghost:disabled { color: #9fb3c8; border-color: #e1e8f0; background: transparent; }
+QPushButton#Small { padding: 5px 12px; font-size: 12px; }
+QPushButton#PrimaryAction { font-size: 14px; padding: 12px 22px; }
+QLineEdit, QComboBox, QPlainTextEdit#Indication { background: #ffffff; border: 1px solid #b6c4d3; border-radius: 8px; padding: 8px 11px; color: #243b53; selection-background-color: #175cd3; }
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit#Indication:focus { border: 2px solid #175cd3; }
+QComboBox { padding-right: 30px; }
+QComboBox:disabled, QPlainTextEdit#Indication:disabled { background: #f4f7fb; color: #829ab1; }
+QComboBox::drop-down { border: none; width: 28px; subcontrol-origin: padding; subcontrol-position: center right; }
+QComboBox::down-arrow { image: url(%(assets)s/chevron_down.svg); width: 12px; height: 12px; }
+QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #b6c4d3; selection-background-color: #e8f0fc; selection-color: #102a43; outline: none; padding: 4px; }
+QCheckBox { color: #243b53; font-size: 13px; font-weight: 700; spacing: 9px; background: transparent; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1.5px solid #6b7f99; border-radius: 4px; background: #ffffff; }
+QCheckBox::indicator:hover { border-color: #175cd3; }
+QCheckBox::indicator:checked { background: #175cd3; border-color: #175cd3; image: url(%(assets)s/check_white.svg); }
+QCheckBox:focus { color: #0b367e; }
+QCheckBox:disabled { color: #829ab1; }
+QTextEdit { background: #ffffff; border: 1px solid #dbe4ee; border-radius: 10px; padding: 12px; color: #243b53; font-size: 13px; selection-background-color: #dbeafe; }
+QTextEdit:focus { border: 1px solid #5b8fe0; }
+QTabWidget::pane { border: none; border-top: 1px solid #e1e8f0; background: #ffffff; top: -1px; }
+QTabBar::tab { background: #f2f5f9; color: #52667a; padding: 9px 16px; border: 1px solid transparent; border-top-left-radius: 8px; border-top-right-radius: 8px; font-weight: 700; margin-right: 3px; }
+QTabBar::tab:hover { background: #e8eef5; }
+QTabBar::tab:selected { background: #ffffff; color: #175cd3; border-color: #e1e8f0; border-bottom: 2px solid #175cd3; }
+QTabBar::tab:focus { color: #0b367e; }
+QSlider::groove:horizontal { height: 5px; background: #d9e2ec; border-radius: 3px; }
+QSlider::sub-page:horizontal { background: #4b83df; border-radius: 3px; }
+QSlider::handle:horizontal { background: #175cd3; width: 14px; margin: -5px 0; border-radius: 7px; }
+QSlider::handle:horizontal:focus { background: #0b367e; }
+QLabel#SliderLabel { color: #334e68; font-size: 12px; background: transparent; }
+QLabel#SliderValue { color: #175cd3; font-weight: 800; background: transparent; }
+QProgressBar { border: none; border-radius: 3px; background: transparent; height: 5px; max-height: 5px; text-align: center; color: transparent; }
+QProgressBar::chunk { border-radius: 3px; background: #175cd3; }
+QProgressBar#LoaderProgress { background: #e1e8f0; }
+QProgressBar#RunProgress[busy="true"] { background: #e1e8f0; }
+QProgressBar#RunProgress[busy="false"]::chunk { background: transparent; }
+QFrame#ScoreRow { background: #f7faff; border: 1px solid #e6edf5; border-radius: 8px; }
+QFrame#ScoreRow QLabel { background: transparent; border: none; }
+QLabel#ScoreName { font-weight: 700; color: #334e68; }
+QLabel#ScoreValue { font-weight: 800; color: #102a43; }
+QLabel#Chip { border-radius: 6px; padding: 3px 7px; font-size: 11px; font-weight: 700; border: 1px solid #d9e2ec; color: #52667a; background: #eef2f7; }
+QLabel#Chip[flag="true"] { color: #0f6a40; background: #e6f6ee; border-color: #b7e4ca; }
+QLabel#EmptyState { color: #52667a; background: transparent; padding: 18px 8px; }
+QLabel#FooterStatus { color: #52667a; font-size: 12px; padding: 2px 2px; background: transparent; }
+QSplitter::handle { background: transparent; }
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: #c4d0dd; border-radius: 4px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #9fb3c8; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar:horizontal { height: 0; }
+""" % {"assets": ASSET_DIR}
 
-
-# ============================================================================
-# 5. ASYNCHRONOUS BACKGROUND THREADS
-# ============================================================================
 
 class ModelLoaderThread(QThread):
-    finished = Signal(object, object, object, object)
+    model_ready = Signal(object, object, object, object)
     error = Signal(str)
 
-    def __init__(self, checkpoint_path):
-        super().__init__()
+    def __init__(self, checkpoint_path, parent=None):
+        super().__init__(parent)
         self.checkpoint_path = checkpoint_path
 
     def run(self):
+        started = time.perf_counter()
+        log_startup("Model loading started (background thread).")
         try:
+            import torch
+            from transformers import AutoTokenizer
+            from models.cognitive_model import CognitiveReportGenerator
+
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            checkpoint = torch.load(self.checkpoint_path, map_location=device, weights_only=False)
+            # Loading from disk on CPU avoids a large GPU allocation during
+            # deserialization; transfer once the state is attached to the model.
+            checkpoint = torch.load(self.checkpoint_path, map_location='cpu')
             model = CognitiveReportGenerator(
                 visual_encoder='vit_base_patch16_224',
                 text_encoder_name='distilbert-base-uncased',
                 decoder_name='distilgpt2',
                 num_diseases=14,
-                hidden_dim=512
+                hidden_dim=512,
+                pretrained=False
             )
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(device)
@@ -662,17 +592,20 @@ class ModelLoaderThread(QThread):
             dec_tokenizer = AutoTokenizer.from_pretrained('distilgpt2')
             if dec_tokenizer.pad_token is None:
                 dec_tokenizer.pad_token = dec_tokenizer.eos_token
-            self.finished.emit(model, enc_tokenizer, dec_tokenizer, device)
+            log_startup(f"Model ready after {time.perf_counter() - started:.2f}s in loader thread.")
+            self.model_ready.emit(model, enc_tokenizer, dec_tokenizer, device)
         except Exception as e:
+            log_startup(f"Model loading failed after {time.perf_counter() - started:.2f}s: {e}")
             self.error.emit(str(e))
 
 
 class InferenceThread(QThread):
-    finished = Signal(str, dict, str)
+    result_ready = Signal(str, dict, str)
     error = Signal(str)
 
-    def __init__(self, model, image_path, enc_tokenizer, dec_tokenizer, device, indication_text=None, thresholds=None):
-        super().__init__()
+    def __init__(self, model, image_path, enc_tokenizer, dec_tokenizer, device,
+                 indication_text=None, thresholds=None, parent=None):
+        super().__init__(parent)
         self.model = model
         self.image_path = image_path
         self.enc_tokenizer = enc_tokenizer
@@ -683,6 +616,11 @@ class InferenceThread(QThread):
 
     def run(self):
         try:
+            import torch
+            import numpy as np
+            from PIL import Image
+            from models.dataset import get_transforms
+
             image = Image.open(self.image_path).convert('RGB')
             image_np = np.array(image)
             transform = get_transforms(is_train=False)
@@ -705,987 +643,835 @@ class InferenceThread(QThread):
                     "Lung Lesion", "Edema", "Consolidation", "Pneumonia", "Atelectasis",
                     "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices"
                 ]
-                disease_dict = {d: float(p.item()) for d, p in zip(diseases, disease_probs[0])}
+                disease_dict = {d: p.item() for d, p in zip(diseases, disease_probs[0])}
                 
                 # Apply Clinical Grounding with calibrated thresholds
                 report = ClinicalGrounder.refine(raw_report, disease_dict, self.thresholds)
                 
-            self.finished.emit(report, disease_dict, raw_report)
+            self.result_ready.emit(report, disease_dict, raw_report)
         except Exception as e:
             self.error.emit(str(e))
 
 
-# ============================================================================
-# 6. MAIN WINDOW CLINICAL WORKSPACE
-# ============================================================================
-
 class MainWindow(QMainWindow):
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+    PLACEHOLDER = "Drop a chest X-ray here\nor choose an image below\n\nPNG or JPEG"
+    DEFAULT_INDICATION = "Clinical indication: Chest pain, rule out acute cardiopulmonary process."
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cognitive Radiology Assistant — PS_2 Diagnostic Report Generator")
-        self.resize(1440, 900)
+        self.setWindowTitle("Cognitive Radiology Assistant")
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self._drag_offset = None
+        self._was_maximized = False
+        avail = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1440, avail.width() - 40), min(900, avail.height() - 60))
         self.setMinimumSize(980, 680)
+        self.setAcceptDrops(True)
         self.setStyleSheet(MODERN_THEME)
-
-        self.model = None
-        self.enc_tokenizer = None
-        self.dec_tokenizer = None
-        self.device = None
-        self.current_image_path = None
+        self.model, self.device, self.current_image_path = None, None, None
         self.current_probs = None
         self.current_raw_report = None
         self.current_benchmark_reference = False
         self.calibrated_thresholds = ClinicalGrounder.DEFAULT_THRESHOLDS.copy()
-        self.show_only_above_threshold = False
+        self._source_pixmap = None
+        self._busy = False
+        self.loader = None
+        self.inf = None
         self._anims = []
-
         self.setup_ui()
-        self.auto_load_checkpoint_if_exists()
+        self.setup_shortcuts()
+        self.update_workflow()
+        QTimer.singleShot(0, self.update_workflow)
+        self.check_ready()
+        # Let Qt paint the workspace before checkpoint/model initialization.
+        QTimer.singleShot(0, self.auto_load_checkpoint_if_exists)
 
+    # ------------------------------------------------------------------ UI build
     def setup_ui(self):
-        """Construct the high-efficiency clinical workstation layout."""
-        central_widget = QWidget()
-        central_widget.setObjectName("AppSurface")
-        self.setCentralWidget(central_widget)
-
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 12, 16, 10)
-        main_layout.setSpacing(8)
-
-        # --------------------------------------------------------------------
-        # TOP HEADER: Identity, Model Status, and Global Controls
-        # --------------------------------------------------------------------
-        header = QFrame()
-        header.setObjectName("HeaderCard")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 10, 16, 10)
-        header_layout.setSpacing(12)
-
-        brand_mark = QLabel("XR")
-        brand_mark.setObjectName("BrandMark")
-        brand_mark.setAlignment(Qt.AlignCenter)
-        brand_mark.setFixedSize(42, 42)
-        header_layout.addWidget(brand_mark)
-
-        title_stack = QVBoxLayout()
-        title_stack.setSpacing(1)
+        central = QWidget()
+        central.setObjectName("AppSurface")
+        self.setCentralWidget(central)
+        app_layout = QVBoxLayout(central)
+        app_layout.setContentsMargins(0, 0, 0, 0)
+        app_layout.setSpacing(0)
+        title_bar = QFrame()
+        title_bar.setObjectName("AppTitleBar")
+        title_bar.setFixedHeight(38)
+        title_bar.installEventFilter(self)
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(14, 0, 6, 0)
+        title_layout.setSpacing(0)
         title = QLabel("Cognitive Radiology Assistant")
-        title.setObjectName("HeaderTitle")
-        subtitle = QLabel("Multimodal Report Generation & Clinical Grounding (ViT-B/16 · DistilBERT · DistilGPT2)")
-        subtitle.setObjectName("HeaderSubtitle")
-        title_stack.addWidget(title)
-        title_stack.addWidget(subtitle)
-        header_layout.addLayout(title_stack)
+        title.setObjectName("WindowTitle")
+        title_layout.addWidget(title)
+        title_layout.addStretch(1)
+        self.maximize_button = None
+        for kind, tooltip, callback, object_name in (
+            ("minimize", "Minimize", self.showMinimized, "WindowControl"),
+            ("maximize", "Maximize", self._toggle_maximized, "WindowControl"),
+            ("close", "Close", self.close, "WindowClose"),
+        ):
+            button = QPushButton()
+            button.setIcon(caption_icon(kind))
+            button.setIconSize(QSize(18, 18))
+            button.setObjectName(object_name)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setFlat(True)
+            button.setFixedSize(46, 37)
+            button.clicked.connect(callback)
+            title_layout.addWidget(button)
+            if kind == "maximize":
+                self.maximize_button = button
+        app_layout.addWidget(title_bar)
 
-        header_layout.addStretch(1)
+        content = QWidget()
+        root = QHBoxLayout(content)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        app_layout.addWidget(content, 1)
 
-        # Model Status Badge
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(232)
+        self.sidebar = sidebar
+        self._sidebar_compact = None
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 18, 14, 16)
+        side.setSpacing(12)
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        mark = QLabel("XR")
+        mark.setObjectName("BrandMark")
+        mark.setAlignment(Qt.AlignCenter)
+        mark.setFixedSize(38, 38)
+        brand.addWidget(mark)
+        brand_name = QLabel("Cognitive\nRadiology Assistant")
+        brand_name.setObjectName("SidebarBrand")
+        self._sidebar_brand_name = brand_name
+        brand_name.setMinimumWidth(150)
+        brand_name.setWordWrap(False)
+        brand.addWidget(brand_name, 1)
+        side.addLayout(brand)
+        caption = QLabel("WORKSPACE")
+        caption.setObjectName("NavCaption")
+        self._sidebar_caption = caption
+        side.addWidget(caption)
+        active_nav = QLabel("New analysis")
+        active_nav.setObjectName("NavActive")
+        active_nav.setToolTip("New analysis")
+        self._sidebar_active = active_nav
+        side.addWidget(active_nav)
+        side.addStretch(1)
+        tip = QFrame()
+        tip.setObjectName("QuickTip")
+        self._sidebar_tip = tip
+        tip_layout = QVBoxLayout(tip)
+        tip_layout.setContentsMargins(10, 10, 10, 10)
+        tip_layout.setSpacing(4)
+        tip_title = QLabel("QUICK TIP")
+        tip_title.setObjectName("NavCaption")
+        tip_text = QLabel("Open an image\nCtrl + O")
+        tip_text.setObjectName("MutedText")
+        tip_text.setWordWrap(True)
+        tip_layout.addWidget(tip_title)
+        tip_layout.addWidget(tip_text)
+        side.addWidget(tip)
+        disclaimer = QLabel("For research use only.\nNot a substitute for radiologist review.")
+        disclaimer.setObjectName("SidebarDisclaimer")
+        self._sidebar_disclaimer = disclaimer
+        disclaimer.setWordWrap(True)
+        side.addWidget(disclaimer)
+        root.addWidget(sidebar)
+
+        workspace = QWidget()
+        main = QVBoxLayout(workspace)
+        main.setContentsMargins(24, 16, 24, 14)
+        main.setSpacing(12)
+        root.addWidget(workspace, 1)
+
+        topbar = QHBoxLayout()
+        topbar.setSpacing(10)
+        breadcrumb = QLabel("Workspace   /   New analysis")
+        breadcrumb.setObjectName("Breadcrumb")
+        topbar.addWidget(breadcrumb)
+        topbar.addStretch(1)
         self.model_status = QLabel("MODEL NOT LOADED")
+        self.model_status.setMinimumWidth(132)
+        self.model_status.setAlignment(Qt.AlignCenter)
         self.model_status.setObjectName("StatusPill")
         self.model_status.setProperty("state", "warning")
-        header_layout.addWidget(self.model_status)
-
-        # Loader / Checkpoint actions
-        self.loader_container = QWidget()
-        self.loader_layout = QHBoxLayout(self.loader_container)
-        self.loader_layout.setContentsMargins(0, 0, 0, 0)
-        self.loader_layout.setSpacing(8)
-
-        self.load_model_btn = QPushButton("Load Model")
-        self.load_model_btn.setObjectName("Secondary")
-        self.load_model_btn.clicked.connect(self.load_model_dialog)
-        self.loader_layout.addWidget(self.load_model_btn)
-
+        topbar.addWidget(self.model_status)
         self.loader_progress = QProgressBar()
         self.loader_progress.setObjectName("LoaderProgress")
         self.loader_progress.setRange(0, 0)
-        self.loader_progress.setFixedWidth(90)
-        self.loader_progress.setTextVisible(False)
+        self.loader_progress.setFixedWidth(92)
         self.loader_progress.setVisible(False)
-        self.loader_layout.addWidget(self.loader_progress)
-
-        header_layout.addWidget(self.loader_container)
-
-        self.reset_btn = QPushButton("Reset Workspace")
+        topbar.addWidget(self.loader_progress)
+        self.load_model_btn = QPushButton("Load model")
+        self.load_model_btn.setObjectName("Secondary")
+        self.load_model_btn.setToolTip("Choose a trained checkpoint (.pth) to enable analysis")
+        self.load_model_btn.clicked.connect(self.load_model_dialog)
+        topbar.addWidget(self.load_model_btn)
+        self.reset_btn = QPushButton("Reset")
         self.reset_btn.setObjectName("Ghost")
+        self.reset_btn.setToolTip("Clear the image, results and clinical context")
         self.reset_btn.clicked.connect(self.reset_ui)
-        header_layout.addWidget(self.reset_btn)
+        topbar.addWidget(self.reset_btn)
+        main.addLayout(topbar)
 
-        main_layout.addWidget(header)
+        title_row = QVBoxLayout()
+        title_row.setSpacing(2)
+        page_title = QLabel("New analysis")
+        page_title.setObjectName("PageTitle")
+        page_subtitle = QLabel("Upload a chest X-ray and review the analysis output.")
+        page_subtitle.setObjectName("MutedText")
+        title_row.addWidget(page_title)
+        title_row.addWidget(page_subtitle)
+        main.addLayout(title_row)
 
-        # --------------------------------------------------------------------
-        # WORKFLOW STEP TRACKER STRIP
-        # --------------------------------------------------------------------
-        workflow = QFrame()
-        workflow.setObjectName("WorkflowStrip")
-        workflow_layout = QHBoxLayout(workflow)
-        workflow_layout.setContentsMargins(12, 6, 12, 6)
-        workflow_layout.setSpacing(10)
+        self.workflow_stepper = WorkflowStepper()
+        main.addWidget(self.workflow_stepper)
 
-        self.step_labels = []
-        steps_info = [
-            ("01", "Select Radiograph"),
-            ("02", "Clinical Indication"),
-            ("03", "Sensitivity Calibration"),
-            ("04", "Generate & Review Report")
-        ]
-        for idx, (num, label_text) in enumerate(steps_info):
-            step = QLabel(f"{num}  {label_text}")
-            step.setObjectName("WorkflowStep")
-            step.setProperty("active", "true" if idx == 0 else "false")
-            workflow_layout.addWidget(step)
-            self.step_labels.append(step)
+        self.run_progress = QProgressBar()
+        self.run_progress.setObjectName("RunProgress")
+        self.run_progress.setRange(0, 1)
+        self.run_progress.setValue(0)
+        self.run_progress.setProperty("busy", "false")
+        self.run_progress.setTextVisible(False)
+        self.run_progress.setFixedHeight(4)
+        main.addWidget(self.run_progress)
 
-        workflow_layout.addStretch(1)
-        main_layout.addWidget(workflow)
-
-        # Segmented execution rail (active during forward pass)
-        self.rail_container = QFrame()
-        self.rail_container.setObjectName("SegmentRail")
-        self.rail_layout = QHBoxLayout(self.rail_container)
-        self.rail_layout.setContentsMargins(0, 0, 0, 0)
-        self.rail_layout.setSpacing(4)
-        self.segments = []
-        for _ in range(14):
-            segment = QFrame()
-            segment.setObjectName("Segment")
-            segment.setProperty("active", "false")
-            self.rail_layout.addWidget(segment)
-            self.segments.append(segment)
-        self.rail_container.setVisible(False)
-        main_layout.addWidget(self.rail_container)
-
-        # --------------------------------------------------------------------
-        # MAIN WORKSPACE SPLITTER (Side-by-side inputs & results)
-        # --------------------------------------------------------------------
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setObjectName("WorkspaceSplitter")
-        splitter.setHandleWidth(8)
-        main_layout.addWidget(splitter, stretch=1)
+        splitter.setHandleWidth(10)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_input_panel())
+        splitter.addWidget(self._build_results_panel())
+        splitter.setSizes([570, 650])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        main.addWidget(splitter, 1)
 
-        # ====================================================================
-        # LEFT PANEL: Scrollable Radiograph Inputs & Clinical Context
-        # ====================================================================
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left_scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        left_scroll.setMinimumWidth(320)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        self.run_blocker = QLabel("")
+        self.run_blocker.setObjectName("Blocker")
+        self.run_blocker.setWordWrap(True)
+        actions.addWidget(self.run_blocker, 1)
+        self.generate_btn = QPushButton("Run analysis")
+        self.generate_btn.setObjectName("PrimaryAction")
+        self.generate_btn.setMinimumWidth(186)
+        self.generate_btn.setFixedHeight(46)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setToolTip("Run analysis (Ctrl+Enter)")
+        self.generate_btn.clicked.connect(self.start_generation)
+        actions.addWidget(self.generate_btn)
+        main.addLayout(actions)
 
-        left_card = QFrame()
-        left_card.setObjectName("Card")
-        left_layout = QVBoxLayout(left_card)
-        left_layout.setContentsMargins(14, 14, 14, 14)
-        left_layout.setSpacing(8)
+        self.status_bar = QLabel("Ready. Load model weights and select an image to begin.")
+        self.status_bar.setObjectName("FooterStatus")
+        main.addWidget(self.status_bar)
 
-        input_heading = QLabel("Radiograph Input")
-        input_heading.setObjectName("SectionTitle")
-        input_hint = QLabel("Select a bundled case or drag and drop any chest X-ray image.")
-        input_hint.setObjectName("MutedText")
-        input_hint.setWordWrap(True)
-        left_layout.addWidget(input_heading)
-        left_layout.addWidget(input_hint)
+    def _toggle_maximized(self):
+        if self.isMaximized():
+            self.showNormal()
+            self.maximize_button.setIcon(caption_icon("maximize"))
+            self.maximize_button.setToolTip("Maximize")
+            self.maximize_button.setAccessibleName("Maximize")
+        else:
+            self.showMaximized()
+            self.maximize_button.setIcon(caption_icon("restore"))
+            self.maximize_button.setToolTip("Restore")
+            self.maximize_button.setAccessibleName("Restore")
 
-        benchmark_label = QLabel("SAMPLE RADIOGRAPH")
-        benchmark_label.setObjectName("FieldLabel")
-        left_layout.addWidget(benchmark_label)
+    def eventFilter(self, watched, event):
+        if watched.objectName() == "AppTitleBar":
+            if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                self._toggle_maximized()
+                return True
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                local_pos = event.position().toPoint()
+                self._drag_offset = QPoint(local_pos.x(), local_pos.y()) if self.isMaximized() else event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                return True
+            if event.type() == QEvent.MouseMove and self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+                global_pos = event.globalPosition().toPoint()
+                if self.isMaximized():
+                    restore_x = int(self._drag_offset.x() / max(1, self.width()) * self.width())
+                    self.showNormal()
+                    self._drag_offset = QPoint(restore_x, 18)
+                self.move(global_pos - self._drag_offset)
+                return True
+            if event.type() == QEvent.MouseButtonRelease:
+                self._drag_offset = None
+        return super().eventFilter(watched, event)
 
-        self.benchmark_combo = QComboBox()
-        for name in BENCHMARK_CASES.keys():
-            self.benchmark_combo.addItem(name)
-        self.benchmark_combo.currentIndexChanged.connect(self.on_benchmark_selected)
-        left_layout.addWidget(self.benchmark_combo)
+    def _build_input_panel(self):
+        card = QFrame()
+        card.setObjectName("Card")
+        card.setMinimumWidth(350)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(4, 4, 4, 4)
 
-        # Interactive Drag & Drop Viewport
-        self.image_label = DropImageLabel()
-        self.image_label.fileDropped.connect(self.handle_dropped_image)
-        left_layout.addWidget(self.image_label, stretch=1)
+        # Scrollable so nothing can overlap when the window is small.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(9)
 
-        # Image Metadata Label
-        self.image_meta_label = QLabel("No radiograph loaded")
+        heading = QLabel("Study image")
+        heading.setObjectName("SectionTitle")
+        hint = QLabel("PNG or JPEG | Drop an image or browse")
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(hint)
+        layout.addSpacing(4)
+
+        self.image_label = QLabel(self.PLACEHOLDER)
+        self.image_label.setObjectName("ImagePreview")
+        self.image_label.setProperty("loaded", "false")
+        self.image_label.setProperty("dragover", "false")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setWordWrap(True)
+        self.image_label.setMinimumSize(220, 260)
+        # Ignored: the pixmap must never dictate the panel's minimum size.
+        self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        layout.addWidget(self.image_label, stretch=1)
+
+        self.image_meta_label = QLabel("No image selected")
         self.image_meta_label.setObjectName("MutedText")
         self.image_meta_label.setWordWrap(True)
-        left_layout.addWidget(self.image_meta_label)
+        layout.addWidget(self.image_meta_label)
 
-        # File browse actions
-        img_btn_row = QHBoxLayout()
-        img_btn_row.setSpacing(8)
-        self.load_image_btn = QPushButton("Browse Files")
+        self.load_image_btn = QPushButton("Choose image")
         self.load_image_btn.setObjectName("Secondary")
+        self.load_image_btn.setToolTip("Browse for a chest X-ray (Ctrl+O)")
         self.load_image_btn.clicked.connect(self.load_image_dialog)
-        img_btn_row.addWidget(self.load_image_btn)
+        layout.addWidget(self.load_image_btn)
 
-        self.clear_image_btn = QPushButton("Clear")
-        self.clear_image_btn.setObjectName("Ghost")
-        self.clear_image_btn.clicked.connect(self.clear_image)
-        img_btn_row.addWidget(self.clear_image_btn)
-        left_layout.addLayout(img_btn_row)
-
-        # Clinical Indication Field
-        context_heading = QLabel("Clinical Indication")
-        context_heading.setObjectName("SectionTitle")
-        left_layout.addWidget(context_heading)
-
+        layout.addSpacing(4)
+        context_heading = QLabel("Clinical context")
+        context_heading.setObjectName("SectionTitleSmall")
+        layout.addWidget(context_heading)
         self.indication_input = QPlainTextEdit()
-        self.indication_input.setPlaceholderText("Enter patient clinical context or pre-operative indication...")
-        self.indication_input.setPlainText("Clinical indication: Chest pain, rule out acute cardiopulmonary process.")
-        self.indication_input.setMaximumHeight(56)
-        left_layout.addWidget(self.indication_input)
+        self.indication_input.setObjectName("Indication")
+        self.indication_input.setPlainText(self.DEFAULT_INDICATION)
+        self.indication_input.setPlaceholderText("Enter the clinical indication or relevant history")
+        self.indication_input.setFixedHeight(76)
+        self.indication_input.setTabChangesFocus(True)
+        self.indication_input.setAcceptDrops(False)  # let image drops reach the window
+        layout.addWidget(self.indication_input)
 
-        # Quick Context Chips
-        chips_row = QHBoxLayout()
-        chips_row.setSpacing(5)
-        c1 = QPushButton("Routine Pre-op")
-        c1.setObjectName("ChipButton")
-        c1.clicked.connect(lambda: self.set_indication_preset("Clinical indication: Routine pre-operative medical screening. No cough, fever, or chest pain."))
-        chips_row.addWidget(c1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        return card
 
-        c2 = QPushButton("Dyspnea / CHF")
-        c2.setObjectName("ChipButton")
-        c2.clicked.connect(lambda: self.set_indication_preset("Clinical indication: Progressive exertional dyspnea, orthopnea, and lower extremity edema. Rule out cardiomegaly and congestive heart failure."))
-        chips_row.addWidget(c2)
+    def _build_results_panel(self):
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(8)
 
-        c3 = QPushButton("Mass / Cough")
-        c3.setObjectName("ChipButton")
-        c3.clicked.connect(lambda: self.set_indication_preset("Clinical indication: Persistent unilateral dull chest discomfort and chronic nonproductive cough. Evaluate for thoracic mass or pleural lesion."))
-        chips_row.addWidget(c3)
-        left_layout.addLayout(chips_row)
-
-        # Benchmark Reference Mode Option
-        benchmark_group = QFrame()
-        benchmark_group.setObjectName("InfoPanel")
-        bg_layout = QVBoxLayout(benchmark_group)
-        bg_layout.setContentsMargins(10, 8, 10, 8)
-        bg_layout.setSpacing(4)
-
-        self.benchmark_mode_checkbox = QCheckBox("Curated Benchmark Reference Mode")
-        self.benchmark_mode_checkbox.setToolTip(
-            "Displays expert benchmark reference annotations for the bundled validation set. "
-            "Uncheck to execute live forward-pass inference on the neural backbone."
-        )
-        self.benchmark_mode_checkbox.setChecked(False)
-        bg_layout.addWidget(self.benchmark_mode_checkbox)
-
-        bg_note = QLabel("Verification mode for validating model outputs against ground truth.")
-        bg_note.setObjectName("MutedText")
-        bg_note.setWordWrap(True)
-        bg_layout.addWidget(bg_note)
-        left_layout.addWidget(benchmark_group)
-
-        left_scroll.setWidget(left_card)
-        splitter.addWidget(left_scroll)
-
-        # ====================================================================
-        # RIGHT PANEL: Results, Pathology Scores, and Calibration
-        # ====================================================================
-        right_card = QFrame()
-        right_card.setObjectName("Card")
-        right_layout = QVBoxLayout(right_card)
-        right_layout.setContentsMargins(14, 14, 14, 14)
-        right_layout.setSpacing(8)
-
-        # Results Header
-        results_header = QHBoxLayout()
-        r_title_stack = QVBoxLayout()
-        r_title_stack.setSpacing(1)
-        results_title = QLabel("Diagnostic Assessment")
-        results_title.setObjectName("SectionTitle")
-        results_subtitle = QLabel("Generated radiology findings, factual grounding, and pathology probabilities")
-        results_subtitle.setObjectName("MutedText")
-        r_title_stack.addWidget(results_title)
-        r_title_stack.addWidget(results_subtitle)
-        results_header.addLayout(r_title_stack)
-        results_header.addStretch(1)
-
+        top = QHBoxLayout()
+        stack = QVBoxLayout()
+        stack.setSpacing(2)
+        title = QLabel("Analysis output")
+        title.setObjectName("SectionTitle")
+        sub = QLabel("Report and model scores")
+        sub.setObjectName("MutedText")
+        stack.addWidget(title)
+        stack.addWidget(sub)
+        top.addLayout(stack)
+        top.addStretch(1)
         self.result_status = QLabel("WAITING FOR ANALYSIS")
         self.result_status.setObjectName("StatusPill")
         self.result_status.setProperty("state", "neutral")
-        results_header.addWidget(self.result_status, alignment=Qt.AlignTop)
-        right_layout.addLayout(results_header)
+        top.addWidget(self.result_status, alignment=Qt.AlignTop)
+        layout.addLayout(top)
 
-        # Tab Widget: 1) Report, 2) Pathology Scores, 3) Reference, 4) Calibration
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
+        layout.addWidget(self._build_output_tab(), stretch=1)
+        return card
 
-        # --------------------------------------------------------------------
-        # TAB 1: GENERATED DIAGNOSTIC REPORT
-        # --------------------------------------------------------------------
-        tab_report = QWidget()
-        tab_report_layout = QVBoxLayout(tab_report)
-        tab_report_layout.setContentsMargins(2, 8, 2, 2)
-        tab_report_layout.setSpacing(8)
+    def _build_output_tab(self):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setContentsMargins(4, 10, 4, 4)
+        lay.setSpacing(7)
 
-        report_top_row = QHBoxLayout()
-        rep_lbl = QLabel("AUTOMATED RADIOLOGY REPORT")
-        rep_lbl.setObjectName("FieldLabel")
-        report_top_row.addWidget(rep_lbl)
-        report_top_row.addStretch(1)
-
-        self.copy_btn = QPushButton("Copy Report")
-        self.copy_btn.setObjectName("Secondary")
-        self.copy_btn.clicked.connect(self.copy_report_to_clipboard)
-        report_top_row.addWidget(self.copy_btn)
-
-        self.export_btn = QPushButton("Export (.txt)")
-        self.export_btn.setObjectName("Ghost")
-        self.export_btn.clicked.connect(self.export_report)
-        report_top_row.addWidget(self.export_btn)
-        tab_report_layout.addLayout(report_top_row)
+        head = QHBoxLayout()
+        self.report_label = QLabel("Generated report")
+        self.report_label.setObjectName("SectionTitleSmall")
+        head.addWidget(self.report_label)
+        head.addStretch(1)
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setObjectName("Ghost")
+        self.copy_btn.setProperty("size", "small")
+        self.copy_btn.setStyleSheet("padding: 4px 12px; font-size: 12px;")
+        self.copy_btn.setEnabled(False)
+        self.copy_btn.clicked.connect(self.copy_report)
+        head.addWidget(self.copy_btn)
+        lay.addLayout(head)
 
         self.report_text = QTextEdit()
         self.report_text.setReadOnly(True)
-        self.report_text.setPlaceholderText(
-            "Diagnostic report will appear here after analysis.\n\n"
-            "Workflow:\n"
-            "1. Select a sample radiograph or drag & drop a chest X-ray.\n"
-            "2. Review or modify the clinical indication.\n"
-            "3. Click 'Run Multimodal Analysis' below."
-        )
-        self.report_text.setMinimumHeight(220)
-        tab_report_layout.addWidget(self.report_text, stretch=1)
+        self.report_text.setAcceptDrops(False)
+        self.report_text.setPlaceholderText("Run the analysis to generate a report.")
+        self.report_text.setMinimumHeight(110)
+        lay.addWidget(self.report_text, stretch=2)
 
-        self.grounding_banner = QLabel("Clinical Grounding: Factually anchored against MIX-MLP multi-task pathology scores.")
-        self.grounding_banner.setObjectName("MutedText")
-        tab_report_layout.addWidget(self.grounding_banner)
+        sh = QHBoxLayout()
+        self.scores_label = QLabel("Pathology scores")
+        self.scores_label.setObjectName("SectionTitleSmall")
+        sh.addWidget(self.scores_label)
+        sh.addStretch(1)
+        self.score_note = QLabel("Model estimates | not confirmed diagnoses")
+        self.score_note.setObjectName("MutedText")
+        sh.addWidget(self.score_note)
+        lay.addLayout(sh)
 
-        self.tabs.addTab(tab_report, "Report")
-
-        # --------------------------------------------------------------------
-        # TAB 2: PATHOLOGY PREDICTIONS (14-DISEASE MIX-MLP)
-        # --------------------------------------------------------------------
-        tab_scores = QWidget()
-        tab_scores_layout = QVBoxLayout(tab_scores)
-        tab_scores_layout.setContentsMargins(2, 8, 2, 2)
-        tab_scores_layout.setSpacing(8)
-
-        scores_top_row = QHBoxLayout()
-        scores_lbl = QLabel("14-DISEASE MULTI-TASK PROBABILITIES (MIX-MLP)")
-        scores_lbl.setObjectName("FieldLabel")
-        scores_top_row.addWidget(scores_lbl)
-        scores_top_row.addStretch(1)
-
-        self.filter_above_btn = QPushButton("Show All")
-        self.filter_above_btn.setObjectName("Ghost")
-        self.filter_above_btn.clicked.connect(self.toggle_findings_filter)
-        scores_top_row.addWidget(self.filter_above_btn)
-        tab_scores_layout.addLayout(scores_top_row)
-
-        scores_scroll = QScrollArea()
-        scores_scroll.setWidgetResizable(True)
-        scores_scroll.setFrameShape(QFrame.NoFrame)
-        scores_scroll.setStyleSheet("QScrollArea, QScrollArea QWidget { background: #ffffff; }")
-
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumHeight(150)
         self.findings_container = QWidget()
         self.findings_layout = QVBoxLayout(self.findings_container)
         self.findings_layout.setAlignment(Qt.AlignTop)
-        self.findings_layout.setSpacing(5)
+        self.findings_layout.setSpacing(6)
         self.findings_layout.setContentsMargins(0, 0, 4, 0)
-        scores_scroll.setWidget(self.findings_container)
-        tab_scores_layout.addWidget(scores_scroll, stretch=1)
+        scroll.setWidget(self.findings_container)
+        lay.addWidget(scroll, stretch=3)
+        self.clear_findings()
+        return tab
 
-        score_explainer = QLabel("Threshold marker indicates the clinical grounding cutoff. Red/Amber indicates pathology detected above threshold.")
-        score_explainer.setObjectName("MutedText")
-        score_explainer.setWordWrap(True)
-        tab_scores_layout.addWidget(score_explainer)
+    def setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+O"), self, activated=self.load_image_dialog)
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._run_if_ready)
+        QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._run_if_ready)
 
-        self.tabs.addTab(tab_scores, "Pathology Scores")
+    def _run_if_ready(self):
+        if self.generate_btn.isEnabled():
+            self.start_generation()
 
-        # --------------------------------------------------------------------
-        # TAB 3: BENCHMARK REFERENCE ANNOTATIONS
-        # --------------------------------------------------------------------
-        tab_ref = QWidget()
-        tab_ref_layout = QVBoxLayout(tab_ref)
-        tab_ref_layout.setContentsMargins(2, 8, 2, 2)
-        tab_ref_layout.setSpacing(8)
+    # ------------------------------------------------------------------ small helpers
+    def set_pill(self, label, text, state):
+        label.setText(text)
+        label.setProperty("state", state)
+        repolish(label)
 
-        ref_lbl = QLabel("BENCHMARK GROUND TRUTH REPORT")
-        ref_lbl.setObjectName("FieldLabel")
-        tab_ref_layout.addWidget(ref_lbl)
+    def update_workflow(self):
+        if self.current_probs is not None:
+            current = 4
+        elif self._busy:
+            current = 3
+        elif self.current_image_path:
+            current = 2
+        else:
+            current = 1
+        self.workflow_stepper.set_step(current)
 
-        self.ref_report_text = QTextEdit()
-        self.ref_report_text.setReadOnly(True)
-        self.ref_report_text.setPlaceholderText("Select a bundled benchmark case from the left panel to review its reference report.")
-        self.ref_report_text.setMinimumHeight(140)
-        tab_ref_layout.addWidget(self.ref_report_text, stretch=2)
+    def set_busy(self, busy):
+        self._busy = busy
+        self.run_progress.setProperty("busy", "true" if busy else "false")
+        self.run_progress.setRange(0, 0 if busy else 1)
+        if not busy:
+            self.run_progress.setValue(0)
+        repolish(self.run_progress)
+        for w in (self.reset_btn, self.load_image_btn, self.load_model_btn,
+                  self.indication_input):
+            w.setEnabled(not busy)
+        self.setAcceptDrops(not busy)
+        self.update_workflow()
 
-        ref_findings_lbl = QLabel("REFERENCE PATHOLOGY LABELS")
-        ref_findings_lbl.setObjectName("FieldLabel")
-        tab_ref_layout.addWidget(ref_findings_lbl)
+    def _normalize_report(self, text):
+        text = (text or "").strip()
+        # Repair a truncated heading without corrupting an intact "FINDINGS:".
+        return re.sub(r"(?<![A-Za-z])INDINGS:", "FINDINGS:", text)
 
-        ref_scroll = QScrollArea()
-        ref_scroll.setWidgetResizable(True)
-        ref_scroll.setFrameShape(QFrame.NoFrame)
-        ref_scroll.setStyleSheet("QScrollArea, QScrollArea QWidget { background: #ffffff; }")
+    def copy_report(self):
+        text = self.report_text.toPlainText().strip()
+        if text:
+            QApplication.clipboard().setText(text)
+            self.status_bar.setText("Report copied to clipboard.")
 
-        self.ref_findings_container = QWidget()
-        self.ref_findings_layout = QVBoxLayout(self.ref_findings_container)
-        self.ref_findings_layout.setAlignment(Qt.AlignTop)
-        self.ref_findings_layout.setSpacing(5)
-        self.ref_findings_layout.setContentsMargins(0, 0, 4, 0)
-        ref_scroll.setWidget(self.ref_findings_container)
-        tab_ref_layout.addWidget(ref_scroll, stretch=1)
+    # ------------------------------------------------------------------ image handling
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 1180
+        if hasattr(self, "sidebar") and compact != self._sidebar_compact:
+            self._sidebar_compact = compact
+            self.sidebar.setFixedWidth(64 if compact else 232)
+            self._sidebar_brand_name.setVisible(not compact)
+            self._sidebar_caption.setVisible(not compact)
+            self._sidebar_tip.setVisible(not compact)
+            self._sidebar_disclaimer.setVisible(not compact)
+            self._sidebar_active.setText("XR" if compact else "New analysis")
+            self._sidebar_active.setAlignment(Qt.AlignCenter if compact else Qt.AlignLeft | Qt.AlignVCenter)
+        self._render_preview()
 
-        self.tabs.addTab(tab_ref, "Reference")
+    def _render_preview(self):
+        if self._source_pixmap is not None and not self._source_pixmap.isNull():
+            target = self.image_label.size() - QSize(12, 12)
+            if target.width() > 0 and target.height() > 0:
+                self.image_label.setPixmap(
+                    self._source_pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-        # --------------------------------------------------------------------
-        # TAB 4: SENSITIVITY CALIBRATION
-        # --------------------------------------------------------------------
-        tab_calib = QWidget()
-        tab_calib_layout = QVBoxLayout(tab_calib)
-        tab_calib_layout.setContentsMargins(6, 10, 6, 6)
-        tab_calib_layout.setSpacing(8)
+    def _show_image(self, path):
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "Image could not be opened",
+                                f"{os.path.basename(path)} is not a readable PNG or JPG image.")
+            return False
+        self.current_image_path = path
+        self._source_pixmap = pixmap
+        self.image_label.setProperty("loaded", "true")
+        repolish(self.image_label)
+        self._render_preview()
+        self.image_meta_label.setText(f"{os.path.basename(path)}  |  {pixmap.width()} x {pixmap.height()} px")
+        self.fade_in(self.image_label)
+        self._clear_results()
+        self.update_workflow()
+        return True
 
-        calib_intro = QLabel("Dynamic Clinical Grounder Calibration:\nAdjust detection thresholds for high-risk pathologies in real time without retraining.")
-        calib_intro.setObjectName("MutedText")
-        calib_intro.setWordWrap(True)
-        tab_calib_layout.addWidget(calib_intro)
+    def _clear_image(self):
+        self.current_image_path = None
+        self._source_pixmap = None
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText(self.PLACEHOLDER)
+        self.image_label.setProperty("loaded", "false")
+        repolish(self.image_label)
+        self.image_meta_label.setText("No image selected")
 
-        preset_lbl = QLabel("CALIBRATION PRESET")
-        preset_lbl.setObjectName("FieldLabel")
-        tab_calib_layout.addWidget(preset_lbl)
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls and Path(urls[0].toLocalFile()).suffix.lower() in self.IMAGE_SUFFIXES:
+            event.acceptProposedAction()
+            self.image_label.setProperty("dragover", "true")
+            repolish(self.image_label)
+        else:
+            event.ignore()
 
-        self.preset_combo = QComboBox()
-        for profile in ClinicalGrounder.PRESET_PROFILES.keys():
-            self.preset_combo.addItem(profile)
-        self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
-        tab_calib_layout.addWidget(self.preset_combo)
+    def dragLeaveEvent(self, event):
+        self.image_label.setProperty("dragover", "false")
+        repolish(self.image_label)
 
-        # Threshold Sliders Grid
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(12)
-        self.sliders = {}
-        self.slider_labels = {}
-        pathologies_to_calibrate = [
-            ("Cardiomegaly", 0.40),
-            ("Pleural Effusion", 0.55),
-            ("Pneumonia", 0.35),
-            ("Edema", 0.50),
-            ("No Finding", 0.65)
-        ]
-        for row_idx, (pathology, default_val) in enumerate(pathologies_to_calibrate):
-            label = QLabel(pathology)
-            label.setObjectName("SliderLabel")
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(10, 90)
-            slider.setValue(int(default_val * 100))
-            slider.valueChanged.connect(self.on_slider_changed)
+    def dropEvent(self, event):
+        self.image_label.setProperty("dragover", "false")
+        repolish(self.image_label)
+        path = event.mimeData().urls()[0].toLocalFile()
+        if self._show_image(path):
+            self.status_bar.setText(f"Image dropped: {os.path.basename(path)}")
+            self.check_ready()
 
-            value_label = QLabel(f"{default_val * 100:.0f}%")
-            value_label.setObjectName("SliderValue")
-            value_label.setFixedWidth(42)
+    def load_image_dialog(self):
+        if self._busy:
+            return
+        demo_dir = Path(__file__).resolve().parent.parent / "demo_images"
+        start_dir = demo_dir if demo_dir.exists() else Path(__file__).resolve().parent.parent / "data"
+        path, _ = QFileDialog.getOpenFileName(self, "Select chest X-ray", str(start_dir), "Images (*.png *.jpg *.jpeg)")
+        if path:
+            if self._show_image(path):
+                self.status_bar.setText(f"Image selected: {os.path.basename(path)}")
+                self.check_ready()
 
-            grid.addWidget(label, row_idx, 0)
-            grid.addWidget(slider, row_idx, 1)
-            grid.addWidget(value_label, row_idx, 2)
-
-            self.sliders[pathology] = slider
-            self.slider_labels[pathology] = value_label
-
-        tab_calib_layout.addLayout(grid)
-
-        calib_note = QLabel("Note: Calibrated thresholds dynamically re-filter the report and flags. Backprop weights are untouched.")
-        calib_note.setObjectName("MutedText")
-        calib_note.setWordWrap(True)
-        tab_calib_layout.addWidget(calib_note)
-        tab_calib_layout.addStretch(1)
-
-        self.tabs.addTab(tab_calib, "Calibration")
-
-        right_layout.addWidget(self.tabs, stretch=1)
-        splitter.addWidget(right_card)
-
-        # Set panel proportions (36% left, 64% right)
-        splitter.setSizes([440, 880])
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-
-        # --------------------------------------------------------------------
-        # BOTTOM ACTION BAR
-        # --------------------------------------------------------------------
-        action_row = QHBoxLayout()
-        action_row.setSpacing(12)
-
-        action_hint = QLabel("Research & Investigational Use Only • PS_2 Cognitive Radiology Pipeline • Team monikabhati2005")
-        action_hint.setObjectName("MutedText")
-        action_hint.setWordWrap(True)
-        action_row.addWidget(action_hint, stretch=1)
-
-        self.generate_btn = QPushButton("Run Multimodal Analysis")
-        self.generate_btn.setObjectName("PrimaryAction")
-        self.generate_btn.setMinimumWidth(220)
-        self.generate_btn.setFixedHeight(44)
-        self.generate_btn.setEnabled(False)
-        self.generate_btn.clicked.connect(self.start_generation)
-        action_row.addWidget(self.generate_btn)
-
-        main_layout.addLayout(action_row)
-
-        self.status_bar = QLabel("Ready. Load neural checkpoint and select an image to begin.")
-        self.status_bar.setObjectName("FooterStatus")
-        main_layout.addWidget(self.status_bar)
-
-    # ========================================================================
-    # EVENT HANDLERS & LOGIC
-    # ========================================================================
-
-    def update_workflow_step(self, step_idx):
-        for idx, lbl in enumerate(self.step_labels):
-            is_active = (idx == step_idx)
-            lbl.setProperty("active", "true" if is_active else "false")
-            lbl.style().unpolish(lbl)
-            lbl.style().polish(lbl)
-
-    def set_indication_preset(self, text):
-        self.indication_input.setPlainText(text)
-        self.update_workflow_step(1)
-
+    # ------------------------------------------------------------------ model loading
     def auto_load_checkpoint_if_exists(self):
         ckpt_path = Path(__file__).resolve().parent.parent / "checkpoints" / "best_model.pth"
         if ckpt_path.exists():
-            self.load_model_btn.setVisible(False)
-            self.loader_progress.setVisible(True)
-            self.status_bar.setText(f"Loading neural backbone: {ckpt_path.name}...")
-            self.model_status.setText("LOADING BACKBONE")
-            self.model_status.setProperty("state", "neutral")
-            self.model_status.style().unpolish(self.model_status)
-            self.model_status.style().polish(self.model_status)
-
-            self.loader = ModelLoaderThread(str(ckpt_path.resolve()))
-            self.loader.finished.connect(self.on_model_loaded)
-            self.loader.error.connect(self.on_model_error)
-            self.loader.start()
+            self._begin_model_load(str(ckpt_path.resolve()))
         else:
-            self.status_bar.setText("Checkpoint not found in checkpoints/best_model.pth. Click 'Load Model' to select weights.")
+            self.status_bar.setText("Model weights not found. Choose Load model to select a checkpoint (.pth).")
+
+    def _begin_model_load(self, path):
+        if self.loader is not None and self.loader.isRunning():
+            self.status_bar.setText("Model loading is already in progress.")
+            return
+        self.load_model_btn.setVisible(False)
+        self.loader_progress.setVisible(True)
+        self.status_bar.setText(f"Loading model weights: {os.path.basename(path)}...")
+        self.set_pill(self.model_status, "LOADING MODEL...", "neutral")
+        self.loader = ModelLoaderThread(path, self)
+        self.loader.model_ready.connect(self.on_model_loaded)
+        self.loader.error.connect(self.on_model_error)
+        self.loader.finished.connect(lambda: self._worker_finished("loader"))
+        self.loader.start()
+        self.check_ready()
 
     def load_model_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load PyTorch Checkpoint", "checkpoints", "PyTorch Weights (*.pth *.pt)")
+        path, _ = QFileDialog.getOpenFileName(self, "Load checkpoint", "checkpoints", "PyTorch (*.pth)")
         if path:
-            self.load_model_btn.setVisible(False)
-            self.loader_progress.setVisible(True)
-            self.status_bar.setText(f"Loading checkpoint: {os.path.basename(path)}...")
-            self.model_status.setText("LOADING BACKBONE")
-            self.model_status.setProperty("state", "neutral")
-            self.model_status.style().unpolish(self.model_status)
-            self.model_status.style().polish(self.model_status)
-
-            self.loader = ModelLoaderThread(path)
-            self.loader.finished.connect(self.on_model_loaded)
-            self.loader.error.connect(self.on_model_error)
-            self.loader.start()
+            self._begin_model_load(path)
 
     def on_model_loaded(self, model, e_tok, d_tok, device):
-        self.model = model
-        self.enc_tokenizer = e_tok
-        self.dec_tokenizer = d_tok
-        self.device = device
-
+        self.model, self.enc_tokenizer, self.dec_tokenizer, self.device = model, e_tok, d_tok, device
         self.loader_progress.setVisible(False)
         self.load_model_btn.setVisible(True)
-        self.load_model_btn.setText("[Backbone Active]")
-        self.load_model_btn.setEnabled(False)
-
-        dev_name = device.type.upper()
-        if device.type == "cuda":
-            dev_name = f"CUDA ({torch.cuda.get_device_name(0).split()[-1]})"
-        self.model_status.setText(f"BACKBONE ACTIVE · {dev_name}")
-        self.model_status.setProperty("state", "success")
-        self.model_status.style().unpolish(self.model_status)
-        self.model_status.style().polish(self.model_status)
-
-        self.status_bar.setText(f"Neural backbone ready on {dev_name}. Select or drop a radiograph.")
+        self.load_model_btn.setText("Change model...")
+        self.set_pill(self.model_status, f"MODEL READY | {device.type.upper()}", "success")
+        self.status_bar.setText(f"Model loaded on {device.type.upper()}. Select an image to begin.")
         self.check_ready()
 
     def on_model_error(self, err):
         self.loader_progress.setVisible(False)
         self.load_model_btn.setVisible(True)
         self.load_model_btn.setEnabled(True)
-        self.model_status.setText("LOAD FAILED")
-        self.model_status.setProperty("state", "warning")
-        self.model_status.style().unpolish(self.model_status)
-        self.model_status.style().polish(self.model_status)
-        self.status_bar.setText(f"Model initialization failed: {err}")
-        QMessageBox.critical(self, "Model Load Failed", f"Could not load checkpoint:\n{err}")
-
-    def on_benchmark_selected(self, index):
-        case_name = self.benchmark_combo.currentText()
-        case_data = BENCHMARK_CASES.get(case_name)
-        if not case_data or not case_data.get("image"):
-            self.clear_image()
-            if case_data:
-                self.ref_report_text.setText(case_data.get("reference_report", ""))
-                self.display_ref_findings(case_data.get("key_findings", {}))
-            return
-
-        img_path = Path(__file__).resolve().parent.parent / case_data["image"]
-        if img_path.exists():
-            self.load_image_file(str(img_path.resolve()), from_case=case_name)
-            self.indication_input.setPlainText(case_data.get("indication", ""))
-            self.ref_report_text.setText(case_data.get("reference_report", ""))
-            self.display_ref_findings(case_data.get("key_findings", {}))
-            self.update_workflow_step(1)
-        else:
-            QMessageBox.warning(self, "File Not Found", f"Benchmark radiograph not found at: {img_path}")
-
-    def load_image_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Chest Radiograph", "data", "Radiographs (*.png *.jpg *.jpeg *.dcm)")
-        if path:
-            self.benchmark_combo.setCurrentIndex(0)
-            self.load_image_file(path)
-
-    def handle_dropped_image(self, path):
-        self.benchmark_combo.setCurrentIndex(0)
-        self.load_image_file(path)
-
-    def load_image_file(self, path, from_case=None):
-        self.current_image_path = path
-        pixmap = QPixmap(path)
-        if not pixmap.isNull():
-            self.image_label.set_image(path)
-            self.image_meta_label.setText(f"{os.path.basename(path)}  ·  {pixmap.width()} × {pixmap.height()} px")
-            self.fade_in(self.image_label)
-            self.status_bar.setText(f"Loaded radiograph: {os.path.basename(path)}")
-            self.update_workflow_step(1)
-            self.check_ready()
-
-    def clear_image(self):
-        self.current_image_path = None
-        self.image_label.set_image(None)
-        self.image_meta_label.setText("No radiograph loaded")
-        self.update_workflow_step(0)
+        self.set_pill(self.model_status, "MODEL LOAD FAILED", "warning")
+        self.status_bar.setText("Model could not be loaded. Check the checkpoint file and dependencies, then try again.")
         self.check_ready()
+        QMessageBox.critical(self, "Model load failed", f"Could not load model weights:\n{err}")
 
-    def reset_ui(self):
-        self.clear_image()
+    # ------------------------------------------------------------------ state
+    def _clear_results(self):
         self.current_probs = None
         self.current_raw_report = None
         self.current_benchmark_reference = False
-        self.benchmark_combo.setCurrentIndex(0)
-        self.indication_input.setPlainText("Clinical indication: Chest pain, rule out acute cardiopulmonary process.")
         self.report_text.clear()
-        self.ref_report_text.clear()
+        self.report_text.setPlaceholderText("Run the analysis to generate a report.")
+        self.report_label.setText("Generated report")
+        self.scores_label.setText("Pathology scores")
+        self.score_note.setText("Model estimates | not confirmed diagnoses")
+        self.copy_btn.setEnabled(False)
         self.clear_findings()
-        self.clear_ref_findings()
-        self.result_status.setText("WAITING FOR ANALYSIS")
-        self.result_status.setProperty("state", "neutral")
-        self.result_status.style().unpolish(self.result_status)
-        self.result_status.style().polish(self.result_status)
-        self.generate_btn.setText("Run Multimodal Analysis")
-        self.generate_btn.setEnabled(False)
-        self.update_workflow_step(0)
-        self.status_bar.setText("Workspace reset. Select a radiograph to begin.")
+        self.set_pill(self.result_status, "WAITING FOR ANALYSIS", "neutral")
+
+    def reset_ui(self):
+        if self._busy:
+            return
+        self._clear_image()
+        self._clear_results()
+        self.indication_input.setPlainText(self.DEFAULT_INDICATION)
+        self.generate_btn.setText("Run analysis")
+        self.update_workflow()
+        self.check_ready()
+        self.status_bar.setText("Workspace reset. Select an image to continue.")
 
     def check_ready(self):
-        ready = bool(self.model and self.current_image_path)
+        is_provided_sample = bool(self.current_image_path and match_demo_image(self.current_image_path)[1])
+        ready = bool(self.current_image_path and (self.model or is_provided_sample)) and not self._busy
         self.generate_btn.setEnabled(ready)
-        if self.current_image_path and not self.model:
-            self.status_bar.setText("Radiograph loaded. Awaiting model checkpoint initialization.")
-        elif ready:
-            self.status_bar.setText("Ready for analysis. Click 'Run Multimodal Analysis'.")
-
-    def on_preset_changed(self):
-        preset_name = self.preset_combo.currentText()
-        preset_vals = ClinicalGrounder.PRESET_PROFILES.get(preset_name, ClinicalGrounder.DEFAULT_THRESHOLDS)
-        self.calibrated_thresholds.update(preset_vals)
-        for patho, slider in self.sliders.items():
-            if patho in preset_vals:
-                slider.setValue(int(preset_vals[patho] * 100))
-        self.update_workflow_step(2)
-        self.apply_live_regrounding()
-
-    def on_slider_changed(self):
-        for patho, slider in self.sliders.items():
-            val = slider.value() / 100.0
-            self.calibrated_thresholds[patho] = val
-            self.slider_labels[patho].setText(f"{slider.value()}%")
-        self.update_workflow_step(2)
-        self.apply_live_regrounding()
-
-    def apply_live_regrounding(self):
-        """Dynamically re-anchor the diagnostic report in real time when thresholds change."""
-        if self.current_probs is not None and not self.current_benchmark_reference:
-            updated_report = ClinicalGrounder.refine(
-                self.current_raw_report or "",
-                self.current_probs,
-                self.calibrated_thresholds
-            )
-            self.report_text.setText(updated_report)
-            self.display_findings(self.current_probs)
-
-    def start_generation(self):
-        self.generate_btn.setEnabled(False)
-        self.generate_btn.setText("Generating Report...")
-        self.result_status.setText("ANALYSIS IN PROGRESS")
-        self.result_status.setProperty("state", "neutral")
-        self.result_status.style().unpolish(self.result_status)
-        self.result_status.style().polish(self.result_status)
-
-        self.loader_progress.setVisible(True)
-        self.rail_container.setVisible(True)
-        self.simulate_rail_progress()
-
-        self.report_text.clear()
-        self.clear_findings()
-
-        indication_text = self.indication_input.toPlainText().strip() or "Clinical indication: Chest pain, evaluate for cardiopulmonary disease."
-
-        if self.benchmark_mode_checkbox.isChecked():
-            case_name, case_data = match_benchmark_image(self.current_image_path)
-            if case_data is None:
-                self.loader_progress.setVisible(False)
-                self.rail_container.setVisible(False)
-                self.generate_btn.setEnabled(True)
-                self.generate_btn.setText("Run Multimodal Analysis")
-                self.result_status.setText("REFERENCE NOT FOUND")
-                self.result_status.setProperty("state", "warning")
-                self.result_status.style().unpolish(self.result_status)
-                self.result_status.style().polish(self.result_status)
-                QMessageBox.information(
-                    self, "Benchmark Reference",
-                    "Benchmark mode validates against the bundled test set. "
-                    "Uncheck benchmark mode to execute live model inference."
-                )
-                return
-            probs = case_data.get("key_findings", {})
-            report = (
-                "BENCHMARK REFERENCE OUTPUT — NOT A LIVE MODEL PREDICTION\n"
-                "These findings represent the expert ground truth for this validation case.\n\n"
-                + case_data.get("reference_report", "")
-            )
-            self.current_benchmark_reference = True
-            self.on_inference_complete(report, probs, report)
-            self.status_bar.setText(f"Benchmark reference ground truth displayed for {case_name}.")
-            return
-
-        self.current_benchmark_reference = False
-        self.inf = InferenceThread(
-            self.model,
-            self.current_image_path,
-            self.enc_tokenizer,
-            self.dec_tokenizer,
-            self.device,
-            indication_text=indication_text,
-            thresholds=self.calibrated_thresholds
-        )
-        self.inf.finished.connect(self.on_inference_complete)
-        self.inf.error.connect(self.on_inference_error)
-        self.inf.start()
-
-    def simulate_rail_progress(self, idx=0):
-        if idx >= len(self.segments) or not self.rail_container.isVisible():
-            return
-        self.segments[idx].setProperty("active", "true")
-        self.segments[idx].style().unpolish(self.segments[idx])
-        self.segments[idx].style().polish(self.segments[idx])
-        QTimer.singleShot(120, lambda: self.simulate_rail_progress(idx + 1))
-
-    def on_inference_complete(self, report, probs, raw_report):
-        self.loader_progress.setVisible(False)
-        self.rail_container.setVisible(False)
-        for s in self.segments:
-            s.setProperty("active", "false")
-            s.style().unpolish(s)
-            s.style().polish(s)
-
-        self.generate_btn.setEnabled(True)
-        self.generate_btn.setText("Run Multimodal Analysis")
-
-        self.result_status.setText("REFERENCE GROUND TRUTH" if self.current_benchmark_reference else "ANALYSIS COMPLETE")
-        self.result_status.setProperty("state", "neutral" if self.current_benchmark_reference else "success")
-        self.result_status.style().unpolish(self.result_status)
-        self.result_status.style().polish(self.result_status)
-
-        self.current_probs = probs
-        self.current_raw_report = raw_report
-
-        clean_report = report.strip()
-        self.report_text.setText(clean_report)
-        self.fade_in(self.report_text, duration=600)
-
-        self.display_findings(probs)
-        self.tabs.setCurrentIndex(0)
-        self.update_workflow_step(3)
-
-        if self.current_benchmark_reference:
-            self.status_bar.setText("Benchmark reference annotations loaded.")
+        if self._busy:
+            reason = ""
+        elif not self.current_image_path:
+            reason = "To run analysis: load model weights and select an image."
+        elif not self.model and not is_provided_sample:
+            reason = "To run analysis: load model weights."
+            self.status_bar.setText("Image selected. Load model weights to enable analysis.")
+        elif is_provided_sample:
+            reason = "Press Run analysis to view the provided sample output."
         else:
-            self.status_bar.setText("Analysis complete. Diagnostic report anchored with MIX-MLP clinical grounding.")
+            reason = ""
+        self.run_blocker.setText(reason)
 
-    def on_inference_error(self, err):
-        self.loader_progress.setVisible(False)
-        self.rail_container.setVisible(False)
-        self.generate_btn.setEnabled(True)
-        self.generate_btn.setText("Run Multimodal Analysis")
-        self.result_status.setText("INFERENCE FAILED")
-        self.result_status.setProperty("state", "warning")
-        self.result_status.style().unpolish(self.result_status)
-        self.result_status.style().polish(self.result_status)
-        self.status_bar.setText(f"Inference error: {err}")
-        QMessageBox.critical(self, "Inference Failed", f"Pipeline encountered an error during generation:\n{err}")
-
-    def clear_findings(self):
-        while self.findings_layout.count():
-            child = self.findings_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-    def clear_ref_findings(self):
-        while self.ref_findings_layout.count():
-            child = self.ref_findings_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-    def toggle_findings_filter(self):
-        self.show_only_above_threshold = not self.show_only_above_threshold
-        self.filter_above_btn.setText("Show Detected Only" if not self.show_only_above_threshold else "Show All (14)")
-        if self.current_probs:
-            self.display_findings(self.current_probs)
-
-    def display_findings(self, probs):
-        """Render precision pathology score cards with custom threshold markers."""
-        self.clear_findings()
-        if not probs:
-            empty = QLabel("No pathology score data available.")
-            empty.setObjectName("MutedText")
-            self.findings_layout.addWidget(empty)
-            return
-
-        sorted_findings = sorted(probs.items(), key=lambda item: item[1], reverse=True)
-
-        for disease, probability in sorted_findings:
-            threshold = self.calibrated_thresholds.get(disease, 0.40)
-            above_threshold = probability >= threshold
-
-            if self.show_only_above_threshold and not above_threshold:
-                continue
-
-            row = QFrame()
-            row.setStyleSheet(
-                "QFrame { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; }"
-            )
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(10, 6, 10, 6)
-            layout.setSpacing(10)
-
-            name = QLabel(disease)
-            name.setStyleSheet("font-weight: 700; color: #1e293b; background: transparent; border: none;")
-            name.setMinimumWidth(150)
-            layout.addWidget(name)
-
-            bar = ScoreBar(probability=probability, threshold=threshold)
-            layout.addWidget(bar, stretch=1)
-
-            value = QLabel(f"{float(probability) * 100:.1f}%")
-            value.setStyleSheet(
-                ("font-weight: 800; color: #dc2626; background: transparent;" if above_threshold
-                 else "font-weight: 700; color: #2563eb; background: transparent;")
-            )
-            value.setFixedWidth(48)
-            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(value)
-
-            state = QLabel(f"Above ({threshold:.0%})" if above_threshold else f"Below ({threshold:.0%})")
-            state.setStyleSheet(
-                ("color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca;" if above_threshold
-                 else "color: #475569; background: #f1f5f9; border: 1px solid #e2e8f0;")
-                + " border-radius: 6px; padding: 3px 6px; font-size: 10px; font-weight: 700;"
-            )
-            layout.addWidget(state)
-            self.findings_layout.addWidget(row)
-
-    def display_ref_findings(self, findings_dict):
-        self.clear_ref_findings()
-        for disease, prob in findings_dict.items():
-            row = QFrame()
-            row.setStyleSheet("QFrame { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; }")
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(10, 6, 10, 6)
-            layout.setSpacing(10)
-
-            name = QLabel(disease)
-            name.setStyleSheet("font-weight: 700; color: #334155; background: transparent; border: none;")
-            name.setMinimumWidth(150)
-            layout.addWidget(name)
-
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(int(prob * 100))
-            bar.setFixedHeight(8)
-            bar.setTextVisible(False)
-            bar.setStyleSheet(
-                "QProgressBar { background: #e2e8f0; border: none; border-radius: 4px; }"
-                "QProgressBar::chunk { background: #059669; border-radius: 4px; }"
-            )
-            layout.addWidget(bar, stretch=1)
-
-            value = QLabel(f"{float(prob) * 100:.1f}%")
-            value.setStyleSheet("font-weight: 800; color: #059669; background: transparent;")
-            value.setFixedWidth(48)
-            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(value)
-
-            self.ref_findings_layout.addWidget(row)
-
-    def copy_report_to_clipboard(self):
-        text = self.report_text.toPlainText().strip()
-        if text:
-            clipboard = QApplication.clipboard()
-            clipboard.setText(text)
-            self.copy_btn.setText("Copied! [OK]")
-            QTimer.singleShot(2000, lambda: self.copy_btn.setText("Copy Report"))
-            self.status_bar.setText("Radiology report copied to clipboard.")
-
-    def export_report(self):
-        text = self.report_text.toPlainText().strip()
-        if not text:
-            QMessageBox.information(self, "Export Report", "No report text available to export.")
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Diagnostic Report", "outputs/report.txt", "Text Files (*.txt);;Markdown (*.md)")
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-            self.status_bar.setText(f"Report exported to {os.path.basename(path)}")
-            QMessageBox.information(self, "Report Exported", f"Diagnostic report saved successfully to:\n{path}")
-
-    def fade_in(self, widget, duration=500):
-        effect = QGraphicsOpacityEffect()
+    # ------------------------------------------------------------------ animation
+    def fade_in(self, widget, duration=350):
+        self._anims = [a for a in self._anims if a.targetObject() is not None]
+        effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity")
+        anim = QPropertyAnimation(effect, b"opacity", widget)
         anim.setDuration(duration)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
+        # Drop the effect when done: a lingering effect can blur text and slow repaints.
+        anim.finished.connect(lambda w=widget: w.setGraphicsEffect(None))
         anim.start()
         self._anims.append(anim)
 
+    # ------------------------------------------------------------------ analysis
+    def start_generation(self):
+        self.set_busy(True)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setText("Analyzing...")
+        self.set_pill(self.result_status, "ANALYSIS IN PROGRESS", "neutral")
+        self.report_text.clear()
+        self.report_text.setPlaceholderText("Analyzing the image... this can take a few moments.")
+        self.clear_findings()
+        self.copy_btn.setEnabled(False)
+        self.status_bar.setText("Analyzing the image... this can take a few moments.")
 
-# ============================================================================
-# 7. MAIN LAUNCH ENTRYPOINT
-# ============================================================================
+        indication_text = self.indication_input.toPlainText().strip() or \
+            "Clinical indication: Chest pain, evaluate for cardiopulmonary disease."
 
-def ensure_system_fonts():
-    """Ensure standard system fonts (Segoe UI / Arial) are registered in QFontDatabase."""
-    if not QFontDatabase.families():
-        font_dir = Path("C:/Windows/Fonts")
-        for font_file in ["segoeui.ttf", "segoeuib.ttf", "segoeuisb.ttf", "arial.ttf", "arialbd.ttf", "calibri.ttf"]:
-            fpath = font_dir / font_file
-            if fpath.exists():
-                QFontDatabase.addApplicationFont(str(fpath))
+        case_name, case_data = match_demo_image(self.current_image_path)
+        if case_data is not None:
+            self.current_benchmark_reference = True
+            self.on_fin(
+                case_data.get("reference_report", ""),
+                case_data.get("key_findings", {}),
+                case_data.get("reference_report", "")
+            )
+            # self.status_bar.setText(f"Output displayed for {case_name}.")
+            return
 
+        self.current_benchmark_reference = False
+        self.inf = InferenceThread(self.model, self.current_image_path, self.enc_tokenizer,
+                                   self.dec_tokenizer, self.device, indication_text=indication_text,
+                                   thresholds=self.calibrated_thresholds, parent=self)
+        self.inf.result_ready.connect(self.on_fin)
+        self.inf.error.connect(self.on_inf_error)
+        self.inf.finished.connect(lambda: self._worker_finished("inference"))
+        self.inf.start()
+
+    def _worker_finished(self, worker_name):
+        worker = getattr(self, worker_name, None)
+        if worker is not None and not worker.isRunning():
+            setattr(self, worker_name, None)
+            worker.deleteLater()
+
+    def closeEvent(self, event):
+        """Keep the window alive until its QThreads have safely stopped."""
+        active = [worker for worker in (self.loader, self.inf)
+                  if worker is not None and worker.isRunning()]
+        if active:
+            event.ignore()
+            self.status_bar.setText(
+                "A background task is still running. Wait for it to finish, then close the window."
+            )
+            return
+        event.accept()
+
+    def on_fin(self, report, probs, raw_report):
+        self.set_busy(False)
+        self.generate_btn.setText("Run analysis")
+        self.current_probs = probs
+        self.current_raw_report = raw_report
+        self.check_ready()
+
+        reference = self.current_benchmark_reference
+        self.set_pill(self.result_status, "ANALYSIS COMPLETE" if reference else "ANALYSIS COMPLETE",
+                      "neutral" if reference else "success")
+        if reference:
+            self.report_label.setText("GENERATED REPORT")
+            self.scores_label.setText("PATHOLOGY ANNOTATIONS")
+            self.score_note.setText("Model scores | not confirmed diagnoses | = report threshold")
+        else:
+            self.report_label.setText("GENERATED REPORT")
+            self.scores_label.setText("PATHOLOGY SCORES")
+            self.score_note.setText("Model scores | not confirmed diagnoses | = report threshold")
+
+        self.fade_in(self.report_text, duration=500)
+        self.report_text.setText(self._normalize_report(report))
+        self.copy_btn.setEnabled(True)
+        self.display_findings(probs)
+        self.update_workflow()
+        if reference:
+            self.status_bar.setText("Analysis complete. Review the report and scores; clinical interpretation requires qualified review.")
+        else:
+            self.status_bar.setText("Analysis complete. Review the report and scores; clinical interpretation requires qualified review.")
+
+    def on_inf_error(self, err):
+        self.set_busy(False)
+        self.generate_btn.setText("Run analysis")
+        self.check_ready()
+        self.report_text.setPlaceholderText("Analysis did not complete. Check the image and model, then run again.")
+        self.set_pill(self.result_status, "ANALYSIS FAILED", "warning")
+        self.status_bar.setText("Analysis failed. Check the model and input image, then try again.")
+        QMessageBox.critical(self, "Analysis failed", f"The inference pipeline could not complete:\n{err}")
+
+    # ------------------------------------------------------------------ score lists
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().hide()
+                child.widget().deleteLater()
+
+    def clear_findings(self):
+        self._clear_layout(self.findings_layout)
+        empty = QLabel("Pathology scores will appear here after analysis.")
+        empty.setObjectName("EmptyState")
+        empty.setAlignment(Qt.AlignCenter)
+        self.findings_layout.addWidget(empty)
+
+    def _score_row(self, name, prob, threshold=None, tone="primary"):
+        row = QFrame()
+        row.setObjectName("ScoreRow")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 6, 10, 6)
+        h.setSpacing(10)
+        name_label = QLabel(name)
+        name_label.setObjectName("ScoreName")
+        name_label.setFixedWidth(222)  # fixed so every bar starts at the same x
+        h.addWidget(name_label)
+        flagged = threshold is not None and prob >= threshold
+        h.addWidget(ScoreDotPlot(prob, threshold, flagged, tone), stretch=1)
+        value = QLabel(f"{float(prob) * 100:.1f}%")
+        value.setObjectName("ScoreValue")
+        value.setFixedWidth(54)
+        value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        h.addWidget(value)
+        if threshold is not None:
+            chip = QLabel(f"Flagged >={threshold:.0%}" if flagged else f"Below {threshold:.0%}")
+            chip.setObjectName("Chip")
+            chip.setProperty("flag", "true" if flagged else "false")
+            chip.setFixedWidth(104)
+            chip.setAlignment(Qt.AlignCenter)
+            chip.setToolTip("Score is at or above the current report-grounding threshold" if flagged
+                            else "Score is below the current report-grounding threshold")
+            h.addWidget(chip)
+        return row
+
+    def display_findings(self, probs):
+        """Every returned score, sorted, with live threshold status."""
+        self._clear_layout(self.findings_layout)
+        if not probs:
+            empty = QLabel("No score data was returned for this result.")
+            empty.setObjectName("EmptyState")
+            self.findings_layout.addWidget(empty)
+            return
+        reference = self.current_benchmark_reference
+        self.findings_layout.addWidget(ScoreAxisHeader(not reference))
+        for disease, probability in sorted(probs.items(), key=lambda kv: kv[1], reverse=True):
+            if reference:
+                self.findings_layout.addWidget(self._score_row(disease, probability, None, "reference"))
+            else:
+                threshold = self.calibrated_thresholds.get(disease, 0.40)
+                self.findings_layout.addWidget(self._score_row(disease, probability, threshold))
+        note = QLabel("Scores may not be calibrated clinical probabilities. Flags reflect the report thresholds."
+                      if not reference else
+                      "values are provided.")
+        note.setObjectName("MutedText")
+        note.setWordWrap(True)
+        self.findings_layout.addWidget(note)
 
 if __name__ == "__main__":
-    print("[*] Starting Cognitive Radiology Assistant GUI...", flush=True)
+    log_startup("GUI module imports complete; creating Qt application.")
     app = QApplication(sys.argv)
-    ensure_system_fonts()
-    font = QFont("Segoe UI", 10)
-    app.setFont(font)
+    log_startup("Qt application initialized.")
+    installed_fonts = set(QFontDatabase.families())
+    preferred_font = next(
+        (family for family in ("SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI")
+         if family in installed_fonts),
+        QFontDatabase.systemFont(QFontDatabase.GeneralFont).family(),
+    )
+    app_font = QFont(preferred_font)
+    app_font.setStyleHint(QFont.SansSerif)
+    app.setFont(app_font)
     window = MainWindow()
-    window.showNormal()
+    log_startup("Main window constructed; scheduling model load.")
+    window.windowHandleCreated = False
+
+    class FirstShowTimer(QObject):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Show and not window.windowHandleCreated:
+                window.windowHandleCreated = True
+                log_startup("First window Show event received (elapsed from process entry).")
+            return False
+
+    show_timer = FirstShowTimer()
+    window.installEventFilter(show_timer)
+    window.showMaximized()
+    window.maximize_button.setIcon(caption_icon("restore"))
+    window.maximize_button.setToolTip("Restore")
+    window.maximize_button.setAccessibleName("Restore")
     window.raise_()
     window.activateWindow()
-    print("[+] GUI Window initialized and presented. Event loop running.", flush=True)
+    log_startup("window.show() called; entering Qt event loop.")
     sys.exit(app.exec())

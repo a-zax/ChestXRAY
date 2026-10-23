@@ -197,7 +197,12 @@ def cmd_demo(args):
 def cmd_gui(args):
     """Launch the interactive PySide6 desktop GUI demo."""
     script = PROJECT_ROOT / "scripts" / "gui_app.py"
-    return run_cmd([sys.executable, str(script)])
+    # Keep imports inside the selected Conda/venv environment. On Windows,
+    # user-site packages from another Python installation can otherwise leak
+    # onto sys.path and interfere with Transformers' metadata scan.
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    return run_cmd([sys.executable, str(script)], env=env)
 
 
 def cmd_test(args):
